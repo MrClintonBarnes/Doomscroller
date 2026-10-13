@@ -4,9 +4,20 @@
 #include "sensor.h"
 
 // ============================================================================
+// Battery Hardware Definitions (Seeed XIAO nRF52840 Sense)
+#ifndef PIN_VBAT
+#define PIN_VBAT         32   // D32 / P0.31 - Analog input for battery voltage
+#endif
+#ifndef VBAT_ENABLE
+#define VBAT_ENABLE      14   // D14 / P0.14 - Control pin to enable voltage divider (LOW = enable)
+#endif
+#define PIN_VBAT_ENABLE  VBAT_ENABLE
+
+// ============================================================================
 // Global BLE Objects (Canonical Adafruit Bluefruit Stack)
 // ============================================================================
 BLEDis        bledis;                 // Device Information Service
+BLEBas        blebas;                 // Battery Service (0x180F)
 BLEHidGeneric blehid = BLEHidGeneric(1, 0, 0); // 1 Input Report (Mouse), 0 Output, 0 Feature
 
 // ============================================================================
@@ -62,16 +73,15 @@ uint8_t const hid_report_descriptor[] =
 // State Variables
 static float    g_substepAccumulator = 0.0f;
 static bool     g_telemetryStream    = false;
-static bool     g_pendingParkCursor  = false;
-static uint32_t g_connectTime        = 0;
-static int      g_initialScrollCount = 0;
+static uint32_t g_lastBatteryCheck   = 0;
 
 // Forward Declarations
 void printHelp();
 void printStatus();
 void handleSerialCLI();
 void sendMouseScroll(int8_t scrollSteps);
-void parkMouseCursor();
+float readBatteryVoltage();
+uint8_t readBatteryPercentage();
 
 // ============================================================================
 // BLE Connection Callbacks
@@ -80,9 +90,6 @@ void connect_callback(uint16_t conn_handle) {
   (void)conn_handle;
   g_sensor.resetState();
   g_substepAccumulator = 0.0f;
-  g_pendingParkCursor  = true;
-  g_connectTime        = millis();
-  g_initialScrollCount = 0;
   Serial.println(F("[BLE] Connected to host!"));
 }
 
@@ -91,8 +98,6 @@ void disconnect_callback(uint16_t conn_handle, uint8_t reason) {
   (void)reason;
   g_sensor.enablePower(false);
   g_substepAccumulator = 0.0f;
-  g_pendingParkCursor  = false;
-  g_initialScrollCount = 0;
   Serial.println(F("[BLE] Disconnected from host. Advertising resumed."));
 }
 
@@ -174,6 +179,9 @@ void setup() {
   bledis.setSoftwareRev(FIRMWARE_VERSION);
   bledis.begin();
 
+  // Battery Service (BLE Standard 0x180F)
+  blebas.begin();
+
   // BLE HID Generic Service (Pure Mouse)
   uint16_t input_report_lengths[] = { 5 }; // 5 bytes: Buttons(1), X(1), Y(1), Wheel(1), Pan(1)
   blehid.setReportMap(hid_report_descriptor, sizeof(hid_report_descriptor));
@@ -230,11 +238,11 @@ void loop() {
     return;
   }
 
-  // 3. Auto-park mouse cursor ~1500ms after connection completes
-  // (allows host OS time to complete GATT discovery and instantiate pointer)
-  if (g_pendingParkCursor && (now - g_connectTime >= 1500)) {
-    g_pendingParkCursor = false;
-    parkMouseCursor();
+  // 3. Periodic Battery Monitoring (every 60s while connected)
+  if (now - g_lastBatteryCheck >= 60000 || (g_lastBatteryCheck == 0 && now >= 3000)) {
+    g_lastBatteryCheck = now;
+    uint8_t pct = readBatteryPercentage();
+    blebas.write(pct);
   }
 
   // 4. Connected: sample encoder at 100Hz (10ms)
@@ -266,7 +274,7 @@ void loop() {
       if (stepsToSend > 127) stepsToSend = 127;
       if (stepsToSend < -127) stepsToSend = -127;
 
-      // Send standard mouse scroll wheel report
+      // Send standard mouse scroll wheel report (dx=0, dy=0 keeps pointer over video feed)
       sendMouseScroll((int8_t)stepsToSend);
 
       if (g_telemetryStream) {
@@ -293,37 +301,47 @@ void loop() {
 // Mouse Scroll HID Dispatcher
 // ============================================================================
 void sendMouseScroll(int8_t scrollSteps) {
-  int8_t dx = 0;
-  int8_t dy = 0;
-  // During the first 10 scroll events after connection, add positive displacement
-  // to guarantee the arrow is swept off into the bottom-right corner
-  if (g_initialScrollCount < 10) {
-    g_initialScrollCount++;
-    dx = 100;
-    dy = 100;
-  }
+  // Pure scroll wheel with zero X/Y displacement:
+  // Keeps cursor in the active video viewport so TikTok, Instagram, and web feeds scroll 100% reliably
   // Byte 0: Buttons (0 = none)
-  // Byte 1: X (dx)
-  // Byte 2: Y (dy)
+  // Byte 1: X (0)
+  // Byte 2: Y (0)
   // Byte 3: Wheel (vertical scroll)
   // Byte 4: Pan (horizontal pan, 0)
-  uint8_t report[5] = { 0, (uint8_t)dx, (uint8_t)dy, (uint8_t)scrollSteps, 0 };
+  uint8_t report[5] = { 0, 0, 0, (uint8_t)scrollSteps, 0 };
   blehid.inputReport(1, report, sizeof(report));
 }
 
 // ============================================================================
-// Cursor Parking: smoothly moves pointer into bottom-right corner out of view
+// Battery Measurement Routines
 // ============================================================================
-void parkMouseCursor() {
-  if (!Bluefruit.connected()) return;
-  int sent = 0;
-  // Send verified packets spaced at 15ms (matching the 11.25-20ms BLE connection interval)
-  for (int attempt = 0; attempt < 40 && sent < 25; attempt++) {
-    uint8_t report[5] = { 0, 120, 120, 0, 0 };
-    if (blehid.inputReport(1, report, sizeof(report))) {
-      sent++;
-    }
-    delay(15);
+float readBatteryVoltage() {
+  pinMode(PIN_VBAT_ENABLE, OUTPUT);
+  digitalWrite(PIN_VBAT_ENABLE, LOW); // Enable divider
+  delay(5); // Allow divider voltage to settle
+
+  analogReference(AR_INTERNAL_3_0); // 3.0V reference
+  analogReadResolution(12);         // 12-bit (0..4095)
+
+  analogRead(PIN_VBAT);             // Discard initial sample
+  delay(2);
+  int raw = analogRead(PIN_VBAT);
+
+  digitalWrite(PIN_VBAT_ENABLE, HIGH); // Disable divider to save battery
+
+  // Voltage divider ratio: 1510k / 510k approx
+  float voltage = (raw * 3.0f / 4095.0f) * (1510.0f / 510.0f);
+  return voltage;
+}
+
+uint8_t readBatteryPercentage() {
+  float v = readBatteryVoltage();
+  if (v >= 4.20f) return 100;
+  if (v <= 3.40f) return 0;
+  if (v < 3.70f) {
+    return (uint8_t)((v - 3.40f) / 0.30f * 15.0f);
+  } else {
+    return (uint8_t)(15.0f + (v - 3.70f) / (4.20f - 3.70f) * 85.0f);
   }
 }
 
@@ -334,12 +352,12 @@ void printHelp() {
   Serial.println();
   Serial.println(F("--- Doomscroller Serial Commands ---"));
   Serial.println(F("  status         - Show current status and settings"));
+  Serial.println(F("  battery        - Read battery voltage and estimated percentage"));
   Serial.println(F("  invert         - Toggle scroll direction (invert)"));
   Serial.println(F("  speed <deg>    - Set degrees per wheel click (e.g. 'speed 30.0')"));
   Serial.println(F("  accel <gain>   - Set flick acceleration (e.g. 'accel 0.02', 0=off)"));
   Serial.println(F("  deadzone <deg> - Set deadzone degrees (e.g. 'deadzone 0.18')"));
   Serial.println(F("  name <str>     - Set Bluetooth device name (e.g. 'name Doomscroller')"));
-  Serial.println(F("  park           - Move mouse cursor off to the bottom-right corner"));
   Serial.println(F("  stream         - Toggle live angle & velocity telemetry"));
   Serial.println(F("  unpair         - Clear all BLE bonding keys and re-advertise"));
   Serial.println(F("  defaults       - Reset settings to factory defaults"));
@@ -355,6 +373,12 @@ void printStatus() {
   Serial.print(F("Device Name:      ")); Serial.println(g_settings.deviceName);
   Serial.print(F("BLE Status:       "));
   Serial.println(Bluefruit.connected() ? F("Connected") : F("Advertising (Pairing Mode)"));
+  Serial.print(F("Battery:          "));
+  float v = readBatteryVoltage();
+  Serial.print(v, 2);
+  Serial.print(F("V ("));
+  Serial.print(readBatteryPercentage());
+  Serial.println(F("%)"));
   Serial.print(F("Raw Angle:        ")); Serial.println(g_sensor.getRawAngle());
   Serial.print(F("Scroll Direction: ")); Serial.println(g_settings.invertScroll ? F("INVERTED") : F("NORMAL"));
   Serial.print(F("Degrees/Step:     ")); Serial.println(g_settings.degreesPerStep, 2);
@@ -378,6 +402,14 @@ void handleSerialCLI() {
     printHelp();
   } else if (cmd == "status") {
     printStatus();
+  } else if (cmd == "battery") {
+    float v = readBatteryVoltage();
+    uint8_t p = readBatteryPercentage();
+    Serial.print(F("Battery: "));
+    Serial.print(v, 3);
+    Serial.print(F(" V ("));
+    Serial.print(p);
+    Serial.println(F("%)"));
   } else if (cmd == "invert") {
     g_settings.invertScroll = !g_settings.invertScroll;
     Serial.print(F("Scroll direction inverted: "));
@@ -410,9 +442,6 @@ void handleSerialCLI() {
     } else {
       Serial.println(F("Usage: deadzone <0.01 to 5.0>"));
     }
-  } else if (cmd == "park") {
-    parkMouseCursor();
-    Serial.println(F("Cursor parked to bottom-right corner."));
   } else if (cmd == "name") {
     arg.trim();
     if (arg.length() > 0 && arg.length() < 31) {
