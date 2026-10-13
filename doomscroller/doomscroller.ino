@@ -1,4 +1,5 @@
 #include <bluefruit.h>
+#include "utility/bonding.h"
 #include "config.h"
 #include "settings.h"
 #include "sensor.h"
@@ -129,6 +130,13 @@ void setup() {
   // Connection interval: 11.25ms to 15.0ms for ultra-low latency scrolling
   Bluefruit.Periph.setConnInterval(9, 12);
 
+  // Check boot/reset source
+  uint32_t resetReason = NRF_POWER->RESETREAS;
+  NRF_POWER->RESETREAS = 0xFFFFFFFF; // Clear reset flags
+  if (resetReason & POWER_RESETREAS_RESETPIN_Msk) {
+    Serial.println(F("[System] Boot source: Magnetic Hall Sensor / Pin Reset (letter 'C')"));
+  }
+
   // Device Information Service
   bledis.setManufacturer("Andrew Industries");
   bledis.setModel("Doomscroller Universal");
@@ -180,14 +188,14 @@ void loop() {
 
   // 3. State Machine & Scrolling
   if (g_state == STATE_ADVERTISING) {
-    // Pulse Blue LED to indicate pairing mode (50ms on every 1500ms)
-    if (now - g_lastLedBlink >= 1500) {
+    // Pulse Blue LED inside USB-C port to indicate discovery/pairing mode
+    if (now - g_lastLedBlink >= 600) {
       g_lastLedBlink = now;
-      digitalWrite(PIN_LED_BLUE, LOW);  // LED ON
-      delay(40);
+      digitalWrite(PIN_LED_BLUE, LOW);  // LED ON (active low)
+      delay(80);
       digitalWrite(PIN_LED_BLUE, HIGH); // LED OFF
     }
-    delay(50);
+    delay(40);
     return;
   }
 
@@ -287,6 +295,7 @@ void printHelp() {
   Serial.println(F("  deadzone <deg> - Set deadzone degrees (e.g. 'deadzone 0.18')"));
   Serial.println(F("  name <str>     - Set Bluetooth device name (e.g. 'name Doomscroller')"));
   Serial.println(F("  stream         - Toggle live angle & velocity telemetry"));
+  Serial.println(F("  unpair         - Clear all BLE bonding keys and re-advertise"));
   Serial.println(F("  defaults       - Reset settings to factory defaults"));
   Serial.println(F("  reboot         - Reboot controller"));
   Serial.println(F("  help           - Print this menu"));
@@ -385,6 +394,10 @@ void handleSerialCLI() {
     g_telemetryStream = !g_telemetryStream;
     Serial.print(F("Live telemetry stream: "));
     Serial.println(g_telemetryStream ? F("ON") : F("OFF"));
+  } else if (cmd == "unpair" || cmd == "clearbonds") {
+    bond_clear_all();
+    Serial.println(F("[BLE] All pairing bonds cleared. Re-advertising for fresh pairing."));
+    Bluefruit.Advertising.start(0);
   } else if (cmd == "defaults") {
     settings_reset_defaults();
     settings_save();
