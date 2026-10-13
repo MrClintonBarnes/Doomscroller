@@ -74,12 +74,16 @@ uint8_t const hid_report_descriptor[] =
 static float    g_substepAccumulator = 0.0f;
 static bool     g_telemetryStream    = false;
 static uint32_t g_lastBatteryCheck   = 0;
+static bool     g_pendingParkEdge    = false;
+static uint32_t g_connectTime        = 0;
 
 // Forward Declarations
 void printHelp();
 void printStatus();
 void handleSerialCLI();
 void sendMouseScroll(int8_t scrollSteps);
+void parkMouseEdge();
+void parkMouseCenter();
 float readBatteryVoltage();
 uint8_t readBatteryPercentage();
 
@@ -90,6 +94,8 @@ void connect_callback(uint16_t conn_handle) {
   (void)conn_handle;
   g_sensor.resetState();
   g_substepAccumulator = 0.0f;
+  g_pendingParkEdge    = true;
+  g_connectTime        = millis();
   Serial.println(F("[BLE] Connected to host!"));
 }
 
@@ -98,6 +104,7 @@ void disconnect_callback(uint16_t conn_handle, uint8_t reason) {
   (void)reason;
   g_sensor.enablePower(false);
   g_substepAccumulator = 0.0f;
+  g_pendingParkEdge    = false;
   Serial.println(F("[BLE] Disconnected from host. Advertising resumed."));
 }
 
@@ -238,14 +245,21 @@ void loop() {
     return;
   }
 
-  // 3. Periodic Battery Monitoring (every 60s while connected)
+  // 3. Auto-slide cursor to right edge ~1500ms after connection
+  // (clears center screen while keeping pointer inside TikTok/Instagram video viewport)
+  if (g_pendingParkEdge && (now - g_connectTime >= 1500)) {
+    g_pendingParkEdge = false;
+    parkMouseEdge();
+  }
+
+  // 4. Periodic Battery Monitoring (every 60s while connected)
   if (now - g_lastBatteryCheck >= 60000 || (g_lastBatteryCheck == 0 && now >= 3000)) {
     g_lastBatteryCheck = now;
     uint8_t pct = readBatteryPercentage();
     blebas.write(pct);
   }
 
-  // 4. Connected: sample encoder at 100Hz (10ms)
+  // 5. Connected: sample encoder at 100Hz (10ms)
   float deltaDeg = 0.0f;
   float velocity = 0.0f;
   if (!g_sensor.update(deltaDeg, velocity)) {
@@ -313,6 +327,33 @@ void sendMouseScroll(int8_t scrollSteps) {
 }
 
 // ============================================================================
+// Cursor Positioning: slides cursor to right margin (out of center, inside video)
+// ============================================================================
+void parkMouseEdge() {
+  if (!Bluefruit.connected()) return;
+  int sent = 0;
+  for (int attempt = 0; attempt < 40 && sent < 18; attempt++) {
+    uint8_t report[5] = { 0, 120, 0, 0, 0 };
+    if (blehid.inputReport(1, report, sizeof(report))) {
+      sent++;
+    }
+    delay(15);
+  }
+}
+
+void parkMouseCenter() {
+  if (!Bluefruit.connected()) return;
+  int sent = 0;
+  for (int attempt = 0; attempt < 30 && sent < 8; attempt++) {
+    uint8_t report[5] = { 0, (uint8_t)-120, 0, 0, 0 };
+    if (blehid.inputReport(1, report, sizeof(report))) {
+      sent++;
+    }
+    delay(15);
+  }
+}
+
+// ============================================================================
 // Battery Measurement Routines
 // ============================================================================
 float readBatteryVoltage() {
@@ -358,7 +399,9 @@ void printHelp() {
   Serial.println(F("  accel <gain>   - Set flick acceleration (e.g. 'accel 0.02', 0=off)"));
   Serial.println(F("  deadzone <deg> - Set deadzone degrees (e.g. 'deadzone 0.18')"));
   Serial.println(F("  name <str>     - Set Bluetooth device name (e.g. 'name Doomscroller')"));
-  Serial.println(F("  stream         - Toggle live angle & velocity telemetry"));
+  Serial.println(F("  edge           - Slide mouse cursor to right margin (out of video center)"));
+  Serial.println(F("  center         - Move mouse cursor back towards center"));
+  Serial.println(F("  dfu            - Reboot into UF2 bootloader drive for flashing"));
   Serial.println(F("  unpair         - Clear all BLE bonding keys and re-advertise"));
   Serial.println(F("  defaults       - Reset settings to factory defaults"));
   Serial.println(F("  reboot         - Reboot controller"));
@@ -453,6 +496,16 @@ void handleSerialCLI() {
     } else {
       Serial.println(F("Usage: name <1-30 chars>"));
     }
+  } else if (cmd == "edge" || cmd == "park") {
+    parkMouseEdge();
+    Serial.println(F("Cursor moved to right edge."));
+  } else if (cmd == "center") {
+    parkMouseCenter();
+    Serial.println(F("Cursor moved to center."));
+  } else if (cmd == "dfu" || cmd == "bootloader") {
+    Serial.println(F("Rebooting into UF2 bootloader drive..."));
+    delay(100);
+    enterUf2Dfu();
   } else if (cmd == "stream") {
     g_telemetryStream = !g_telemetryStream;
     Serial.print(F("Live telemetry stream: "));
