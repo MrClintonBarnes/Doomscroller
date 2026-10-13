@@ -12,9 +12,6 @@
 #define PIN_LED_BLUE        12    // P0.06 - Blue LED (used for pairing indicator)
 #define PIN_LED_GREEN       13    // P0.30 - Green LED
 
-// Battery Monitoring Pins
-#define PIN_VBAT_ENABLE     14    // P0.14 - Output LOW to enable battery voltage divider
-#define PIN_VBAT_SENSE      32    // P0.31 - Analog input for battery voltage
 
 // ============================================================================
 // SPI & MagAlpha Encoder Parameters
@@ -29,8 +26,8 @@
 // Default Tuning Parameters
 // ============================================================================
 #define DEFAULT_DEVICE_NAME         "Doomscroller"
-#define DEFAULT_DEGREES_PER_STEP    10.0f     // Degrees of rotation per 1 mouse wheel notch (~36 notches/rev)
-#define DEFAULT_ACCEL_FACTOR        0.05f     // Dynamic acceleration multiplier for fast flicks (0.0 = linear)
+#define DEFAULT_DEGREES_PER_STEP    30.0f     // Degrees of rotation per 1 mouse wheel notch (~12 notches/rev)
+#define DEFAULT_ACCEL_FACTOR        0.02f     // Dynamic acceleration multiplier for fast flicks (0.0 = linear)
 #define DEFAULT_DEADZONE_DEG        0.18f     // Deadzone threshold in degrees per sample to ignore resting noise
 #define DEFAULT_INVERT_SCROLL       false     // Set true to flip scroll direction (or use "invert" via Serial CLI)
 #define DEFAULT_IDLE_TIMEOUT_SEC    30        // Seconds without motion before entering low-power idle

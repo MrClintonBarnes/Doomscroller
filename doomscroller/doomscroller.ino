@@ -1,85 +1,99 @@
 #include <bluefruit.h>
-#include "utility/bonding.h"
 #include "config.h"
 #include "settings.h"
 #include "sensor.h"
-#include "battery.h"
 
 // ============================================================================
-// Global BLE Objects
+// Global BLE Objects (Canonical Adafruit Bluefruit Stack)
 // ============================================================================
-BLEDis bledis;          // Device Information Service
-BLEBas blebas;          // Battery Service
-BLEHidAdafruit blehid;  // Standard Composite HID (Mouse, Consumer, Keyboard)
+BLEDis        bledis;                 // Device Information Service
+BLEHidGeneric blehid = BLEHidGeneric(1, 0, 0); // 1 Input Report (Mouse), 0 Output, 0 Feature
 
 // ============================================================================
-// State Variables
+// Standard BLE HID Mouse Report Descriptor (Universal Cross-Platform)
 // ============================================================================
-enum DeviceState {
-  STATE_ADVERTISING,
-  STATE_CONNECTED_ACTIVE,
-  STATE_CONNECTED_IDLE
+// Natively supported by macOS, Android, Windows, Linux, iOS without any drivers
+// Does NOT declare a keyboard (prevents PIN / Passkey prompts on Android & macOS)
+// Does NOT declare a digitizer (prevents accidental touchscreen clicks / taps)
+uint8_t const hid_report_descriptor[] =
+{
+  0x05, 0x01,        // USAGE_PAGE (Generic Desktop)
+  0x09, 0x02,        // USAGE (Mouse)
+  0xA1, 0x01,        // COLLECTION (Application)
+  0x85, 0x01,        //   REPORT_ID (1)
+  0x09, 0x01,        //   USAGE (Pointer)
+  0xA1, 0x00,        //   COLLECTION (Physical)
+  0x05, 0x09,        //     USAGE_PAGE (Button)
+  0x19, 0x01,        //     USAGE_MINIMUM (Button 1)
+  0x29, 0x05,        //     USAGE_MAXIMUM (Button 5)
+  0x15, 0x00,        //     LOGICAL_MINIMUM (0)
+  0x25, 0x01,        //     LOGICAL_MAXIMUM (1)
+  0x95, 0x05,        //     REPORT_COUNT (5)
+  0x75, 0x01,        //     REPORT_SIZE (1)
+  0x81, 0x02,        //     INPUT (Data,Var,Abs)
+  0x95, 0x01,        //     REPORT_COUNT (1)
+  0x75, 0x03,        //     REPORT_SIZE (3)
+  0x81, 0x03,        //     INPUT (Cnst,Var,Abs)   ; 3 bits padding
+  0x05, 0x01,        //     USAGE_PAGE (Generic Desktop)
+  0x09, 0x30,        //     USAGE (X)
+  0x09, 0x31,        //     USAGE (Y)
+  0x15, 0x81,        //     LOGICAL_MINIMUM (-127)
+  0x25, 0x7F,        //     LOGICAL_MAXIMUM (127)
+  0x75, 0x08,        //     REPORT_SIZE (8)
+  0x95, 0x02,        //     REPORT_COUNT (2)
+  0x81, 0x06,        //     INPUT (Data,Var,Rel)
+  0x09, 0x38,        //     USAGE (Wheel)
+  0x15, 0x81,        //     LOGICAL_MINIMUM (-127)
+  0x25, 0x7F,        //     LOGICAL_MAXIMUM (127)
+  0x75, 0x08,        //     REPORT_SIZE (8)
+  0x95, 0x01,        //     REPORT_COUNT (1)
+  0x81, 0x06,        //     INPUT (Data,Var,Rel)
+  0x05, 0x0C,        //     USAGE_PAGE (Consumer Devices)
+  0x0A, 0x38, 0x02,  //     USAGE (AC Pan)
+  0x15, 0x81,        //     LOGICAL_MINIMUM (-127)
+  0x25, 0x7F,        //     LOGICAL_MAXIMUM (127)
+  0x75, 0x08,        //     REPORT_SIZE (8)
+  0x95, 0x01,        //     REPORT_COUNT (1)
+  0x81, 0x06,        //     INPUT (Data,Var,Rel)
+  0xC0,              //   END_COLLECTION
+  0xC0               // END_COLLECTION
 };
 
-static DeviceState g_state = STATE_ADVERTISING;
-static uint32_t g_lastMotionTime = 0;
-static uint32_t g_lastBatteryCheck = 0;
-static uint32_t g_lastLedBlink = 0;
-static float g_substepAccumulator = 0.0f;
-static bool g_telemetryStream = false;
+// State Variables
+static float    g_substepAccumulator = 0.0f;
+static bool     g_telemetryStream    = false;
+static bool     g_pendingParkCursor  = false;
+static uint32_t g_connectTime        = 0;
+static bool     g_parkedFirstScroll  = false;
 
 // Forward Declarations
 void printHelp();
 void printStatus();
 void handleSerialCLI();
+void sendMouseScroll(int8_t scrollSteps);
+void parkMouseCursor();
 
 // ============================================================================
-// BLE Callbacks
+// BLE Connection Callbacks
 // ============================================================================
 void connect_callback(uint16_t conn_handle) {
-  resumeLoop(); // Guarantee the Arduino loop task is running
-
-  BLEConnection* conn = Bluefruit.Connection(conn_handle);
-  char peerName[32] = {0};
-  if (conn) {
-    conn->getPeerName(peerName, sizeof(peerName));
-  }
-
-  Serial.println();
-  Serial.print(F("[BLE] Connected to: "));
-  Serial.println(peerName[0] ? peerName : "Central device");
-
-  // Visual confirmation: flash Green LED for 250ms
-  digitalWrite(PIN_LED_BLUE, HIGH);   // Blue OFF
-  digitalWrite(PIN_LED_GREEN, LOW);  // Green ON (active LOW)
-  delay(250);
-  digitalWrite(PIN_LED_GREEN, HIGH); // Green OFF
-
-  // Reset state
+  (void)conn_handle;
   g_sensor.resetState();
   g_substepAccumulator = 0.0f;
-  g_lastMotionTime = millis();
-  g_state = STATE_CONNECTED_ACTIVE;
-
-  // Send initial battery level
-  uint8_t batt = BatteryMonitor::readPercentage();
-  blebas.write(batt);
-  Serial.print(F("[Battery] Initial level: "));
-  Serial.print(batt);
-  Serial.println(F("%"));
+  g_pendingParkCursor  = true;
+  g_connectTime        = millis();
+  g_parkedFirstScroll  = false;
+  Serial.println(F("[BLE] Connected to host!"));
 }
 
 void disconnect_callback(uint16_t conn_handle, uint8_t reason) {
   (void)conn_handle;
-  Serial.println();
-  Serial.print(F("[BLE] Disconnected (reason: 0x"));
-  Serial.print(reason, HEX);
-  Serial.println(F("). Entering pairing mode."));
-
-  g_state = STATE_ADVERTISING;
-  g_sensor.enablePower(false); // Sleep sensor when not connected
-  digitalWrite(PIN_LED_GREEN, HIGH);
-  digitalWrite(PIN_LED_RED, HIGH);
+  (void)reason;
+  g_sensor.enablePower(false);
+  g_substepAccumulator = 0.0f;
+  g_pendingParkCursor  = false;
+  g_parkedFirstScroll  = false;
+  Serial.println(F("[BLE] Disconnected from host. Advertising resumed."));
 }
 
 // ============================================================================
@@ -87,83 +101,114 @@ void disconnect_callback(uint16_t conn_handle, uint8_t reason) {
 // ============================================================================
 void setup() {
   Serial.begin(115200);
-  delay(100);
 
-  // Initialize LEDs (active LOW on Seeed XIAO nRF52840)
+  // Configure on-board LEDs
   pinMode(PIN_LED_RED, OUTPUT);
   pinMode(PIN_LED_GREEN, OUTPUT);
   pinMode(PIN_LED_BLUE, OUTPUT);
-  digitalWrite(PIN_LED_RED, HIGH);
-  digitalWrite(PIN_LED_GREEN, HIGH);
-  digitalWrite(PIN_LED_BLUE, HIGH);
+  digitalWrite(PIN_LED_RED, 1 - LED_STATE_ON);
+  digitalWrite(PIN_LED_GREEN, 1 - LED_STATE_ON);
+  digitalWrite(PIN_LED_BLUE, 1 - LED_STATE_ON);
 
-  // Initialize Hardware Modules
-  BatteryMonitor::init();
+  // Check hardware reset reason: detect magnetic swipe over letter "C"
+  uint32_t resetReason = NRF_POWER->RESETREAS;
+  NRF_POWER->RESETREAS = 0xFFFFFFFF; // Clear reset register flags
+  bool isMagneticReset = (resetReason & POWER_RESETREAS_RESETPIN_Msk) != 0;
+
+  // Initialize Settings in RAM
   settings_init();
+
+  // Initialize Bluefruit BLE Peripheral (1 peripheral, 0 centrals)
+  Bluefruit.begin(1, 0);
+  Bluefruit.setTxPower(4); // +4 dBm maximum transmission power
+  Bluefruit.setName(g_settings.deviceName);
+
+  // Manage Bluetooth Identity and Bonds
+  uint8_t resetCount = NRF_POWER->GPREGRET;
+  if (isMagneticReset) {
+    resetCount++;
+    NRF_POWER->GPREGRET = resetCount;
+
+    // Clear old pairing bonds so device can pair cleanly with any host
+    Bluefruit.Periph.clearBonds();
+
+    // Visual feedback for magnetic swipe: 5 fast blue flashes
+    for (int i = 0; i < 5; i++) {
+      digitalWrite(PIN_LED_BLUE, LED_STATE_ON);
+      delay(50);
+      digitalWrite(PIN_LED_BLUE, 1 - LED_STATE_ON);
+      delay(50);
+    }
+  } else {
+    // Normal boot visual confirmation: Green LED pulse
+    digitalWrite(PIN_LED_GREEN, LED_STATE_ON);
+    delay(100);
+    digitalWrite(PIN_LED_GREEN, 1 - LED_STATE_ON);
+  }
+
+  // Set fresh random static BLE identity address
+  // This completely eliminates stale pairing caches ("Doomscroller063") and Android PIN errors
+  ble_gap_addr_t gap_addr;
+  if (sd_ble_gap_addr_get(&gap_addr) == NRF_SUCCESS) {
+    gap_addr.addr_type = BLE_GAP_ADDR_TYPE_RANDOM_STATIC;
+    gap_addr.addr[0] += (resetCount + 1);
+    gap_addr.addr[5] |= 0xC0; // Standard BLE random static address requirement
+    sd_ble_gap_addr_set(&gap_addr);
+  }
+
+  // Security configuration: unauthenticated Just-Works pairing with encryption
+  // Explicitly disables Keyboard and Display caps so hosts NEVER request a passkey/PIN
+  Bluefruit.Security.setIOCaps(false, false, false);
+  Bluefruit.Security.setMITM(false);
+
+  // Connection Interval: 11.25ms (9 * 1.25ms) to 20ms (16 * 1.25ms)
+  Bluefruit.Periph.setConnInterval(9, 16);
+
+  // Connection event callbacks
+  Bluefruit.Periph.setConnectCallback(connect_callback);
+  Bluefruit.Periph.setDisconnectCallback(disconnect_callback);
+
+  // Device Information Service
+  bledis.setManufacturer("Andrew Industries");
+  bledis.setModel("Doomscroller Pro");
+  bledis.setSoftwareRev(FIRMWARE_VERSION);
+  bledis.begin();
+
+  // BLE HID Generic Service (Pure Mouse)
+  uint16_t input_report_lengths[] = { 5 }; // 5 bytes: Buttons(1), X(1), Y(1), Wheel(1), Pan(1)
+  blehid.setReportMap(hid_report_descriptor, sizeof(hid_report_descriptor));
+  blehid.setReportLen(input_report_lengths, NULL, NULL);
+  blehid.enableMouse(true);
+  blehid.enableKeyboard(false);
+  blehid.begin();
+
+  // BLE Advertising configuration
+  Bluefruit.Advertising.addFlags(BLE_GAP_ADV_FLAGS_LE_ONLY_GENERAL_DISC_MODE);
+  Bluefruit.Advertising.addAppearance(BLE_APPEARANCE_HID_MOUSE);
+  Bluefruit.Advertising.addService(blehid);
+  Bluefruit.Advertising.addName();
+  Bluefruit.Advertising.restartOnDisconnect(true);
+  Bluefruit.Advertising.setInterval(32, 244); // 20ms fast mode, 152.5ms slow mode
+  Bluefruit.Advertising.setFastTimeout(60);   // 60 seconds in fast mode
+  Bluefruit.Advertising.start(0);             // Advertise indefinitely until connected
+
+  // Automatic connection LED: blinks Blue LED inside USB-C during advertising, solid ON when connected
+  Bluefruit.autoConnLed(true);
+
+  // Initialize MagAlpha Sensor SPI bus
   g_sensor.begin();
 
   Serial.println();
   Serial.println(F("========================================"));
   Serial.println(F("  DOOMSCROLLER UNIVERSAL FIRMWARE " FIRMWARE_VERSION));
   Serial.println(F("  Cross-Platform BLE Scroll Controller  "));
-  Serial.println(F("  (macOS / Android / iOS / Windows / Linux)"));
   Serial.println(F("========================================"));
   Serial.print(F("Device Name: "));
   Serial.println(g_settings.deviceName);
-  Serial.print(F("Battery:     "));
-  Serial.print(BatteryMonitor::readVoltage(), 2);
-  Serial.print(F("V ("));
-  Serial.print(BatteryMonitor::readPercentage());
-  Serial.println(F("%)"));
-  Serial.println(F("Type 'help' in serial monitor for options."));
-  Serial.println(F("----------------------------------------"));
-
-  // Configure BLE
-  Bluefruit.configPrphBandwidth(BANDWIDTH_MAX);
-  Bluefruit.begin(1, 1);
-  Bluefruit.setTxPower(4); // +4 dBm for strong, reliable signal
-  Bluefruit.setName(g_settings.deviceName);
-
-  // Register Connection Callbacks
-  Bluefruit.Periph.setConnectCallback(connect_callback);
-  Bluefruit.Periph.setDisconnectCallback(disconnect_callback);
-  // Connection interval: 11.25ms to 15.0ms for ultra-low latency scrolling
-  Bluefruit.Periph.setConnInterval(9, 12);
-
-  // Check boot/reset source
-  uint32_t resetReason = NRF_POWER->RESETREAS;
-  NRF_POWER->RESETREAS = 0xFFFFFFFF; // Clear reset flags
-  if (resetReason & POWER_RESETREAS_RESETPIN_Msk) {
-    Serial.println(F("[System] Boot source: Magnetic Hall Sensor / Pin Reset (letter 'C')"));
+  if (isMagneticReset) {
+    Serial.println(F("[System] Magnetic reset detected. Bonds wiped, address refreshed."));
   }
-
-  // Device Information Service
-  bledis.setManufacturer("Andrew Industries");
-  bledis.setModel("Doomscroller Universal");
-  bledis.setSoftwareRev(FIRMWARE_VERSION);
-  bledis.begin();
-
-  // Battery Service
-  blebas.begin();
-  blebas.write(BatteryMonitor::readPercentage());
-
-  // Standard BLE HID Service (Mouse, Consumer, Keyboard)
-  blehid.begin();
-
-  // Advertising configuration
-  Bluefruit.Advertising.addFlags(BLE_GAP_ADV_FLAGS_LE_ONLY_GENERAL_DISC_MODE);
-  Bluefruit.Advertising.addTxPower();
-  Bluefruit.Advertising.addAppearance(BLE_APPEARANCE_HID_MOUSE);
-  Bluefruit.Advertising.addService(blehid);
-  Bluefruit.Advertising.addService(blebas);
-  Bluefruit.Advertising.addName();
-  Bluefruit.Advertising.restartOnDisconnect(true);
-  Bluefruit.Advertising.setInterval(32, 160); // 20ms to 100ms fast advertising
-  Bluefruit.Advertising.setFastTimeout(0);     // Advertise indefinitely without sleeping permanently
-  Bluefruit.Advertising.start(0);
-
-  Serial.println(F("[BLE] Advertising started. Ready to pair."));
-  g_lastMotionTime = millis();
+  Serial.println(F("Ready to pair."));
 }
 
 // ============================================================================
@@ -172,47 +217,26 @@ void setup() {
 void loop() {
   uint32_t now = millis();
 
-  // 1. Process Serial CLI commands
+  // 1. Process Serial CLI commands if connected to USB
   if (Serial.available()) {
     handleSerialCLI();
   }
 
-  // 2. Battery Monitoring (check every 60s)
-  if (now - g_lastBatteryCheck >= 60000) {
-    g_lastBatteryCheck = now;
-    uint8_t batt = BatteryMonitor::readPercentage();
-    if (Bluefruit.connected()) {
-      blebas.write(batt);
-    }
-  }
-
-  // 3. State Machine & Scrolling
-  if (g_state == STATE_ADVERTISING) {
-    // Pulse Blue LED inside USB-C port to indicate discovery/pairing mode
-    if (now - g_lastLedBlink >= 600) {
-      g_lastLedBlink = now;
-      digitalWrite(PIN_LED_BLUE, LOW);  // LED ON (active low)
-      delay(80);
-      digitalWrite(PIN_LED_BLUE, HIGH); // LED OFF
-    }
-    delay(40);
+  // 2. When not connected to Bluetooth, put sensor to sleep to conserve battery
+  if (!Bluefruit.connected()) {
+    g_sensor.enablePower(false);
+    g_substepAccumulator = 0.0f;
+    delay(20);
     return;
   }
 
-  if (g_state == STATE_CONNECTED_IDLE) {
-    // Check for wheel movement every 100ms
-    if (g_sensor.checkIdleWakeup(1.0f)) {
-      Serial.println(F("[Power] Wakeup from idle."));
-      g_state = STATE_CONNECTED_ACTIVE;
-      g_lastMotionTime = now;
-      g_substepAccumulator = 0.0f;
-    } else {
-      delay(IDLE_POLL_INTERVAL_MS);
-      return;
-    }
+  // 3. Auto-park mouse cursor ~400ms after connection completes
+  if (g_pendingParkCursor && (now - g_connectTime >= 400)) {
+    g_pendingParkCursor = false;
+    parkMouseCursor();
   }
 
-  // Active connected state: sample at ~100Hz (10ms)
+  // 4. Connected: sample encoder at 100Hz (10ms)
   float deltaDeg = 0.0f;
   float velocity = 0.0f;
   if (!g_sensor.update(deltaDeg, velocity)) {
@@ -220,25 +244,15 @@ void loop() {
     return;
   }
 
-  // Deadzone filter: ignore micro-tremors and mechanical resting backlash
-  float absDelta = fabsf(deltaDeg);
   float absVel = fabsf(velocity);
-
-  if (absDelta >= g_settings.deadzoneDeg || absVel >= (g_settings.deadzoneDeg * 60.0f)) {
-    g_lastMotionTime = now;
-
-    // Apply scroll direction:
-    // In standard HID Mouse: positive wheel value = scroll UP, negative = scroll DOWN.
-    // If invertScroll is true, flip sign.
+  if (absVel > g_settings.deadzoneDeg) {
     float dir = g_settings.invertScroll ? -1.0f : 1.0f;
     float baseSteps = (deltaDeg / g_settings.degreesPerStep) * dir;
 
-    // Dynamic flick acceleration curve:
-    // Gentle rotation: 1.0x (linear, precise).
-    // Fast flick: progressive multiplier for effortless long feed scrolling.
+    // Dynamic flick acceleration curve
     float accelMultiplier = 1.0f + (absVel * g_settings.accelFactor * 0.01f);
     if (accelMultiplier > 8.0f) {
-      accelMultiplier = 8.0f; // Safe upper bound
+      accelMultiplier = 8.0f;
     }
 
     float totalStepDelta = baseSteps * accelMultiplier;
@@ -246,14 +260,19 @@ void loop() {
 
     int stepsToSend = (int)g_substepAccumulator;
     if (stepsToSend != 0) {
+      // Ensure cursor is parked offscreen on the very first scroll event
+      if (!g_parkedFirstScroll) {
+        g_parkedFirstScroll = true;
+        parkMouseCursor();
+      }
+
       g_substepAccumulator -= (float)stepsToSend;
 
-      // Clamp to int8 limits (-127 to 127)
       if (stepsToSend > 127) stepsToSend = 127;
       if (stepsToSend < -127) stepsToSend = -127;
 
-      // Send standard BLE HID Mouse scroll wheel report
-      blehid.mouseScroll((int8_t)stepsToSend);
+      // Send standard mouse scroll wheel report
+      sendMouseScroll((int8_t)stepsToSend);
 
       if (g_telemetryStream) {
         Serial.print(F("Delta: "));
@@ -265,21 +284,41 @@ void loop() {
       }
     }
   } else {
-    // Settling decay: slowly bleed off remainder when wheel is stopped
+    // Settling decay when wheel is stationary
     g_substepAccumulator *= 0.5f;
     if (fabsf(g_substepAccumulator) < 0.05f) {
       g_substepAccumulator = 0.0f;
     }
-
-    // Check for idle timeout
-    if ((now - g_lastMotionTime) >= (uint32_t)(g_settings.idleTimeoutSec * 1000)) {
-      Serial.println(F("[Power] Idle timeout reached. Entering low-power standby."));
-      g_sensor.enablePower(false);
-      g_state = STATE_CONNECTED_IDLE;
-    }
   }
 
   delay(ACTIVE_LOOP_INTERVAL_MS);
+}
+
+// ============================================================================
+// Mouse Scroll HID Dispatcher
+// ============================================================================
+void sendMouseScroll(int8_t scrollSteps) {
+  // Byte 0: Buttons (0 = none)
+  // Byte 1: X (0)
+  // Byte 2: Y (0)
+  // Byte 3: Wheel (vertical scroll)
+  // Byte 4: Pan (horizontal pan, 0)
+  uint8_t report[5] = { 0, 0, 0, (uint8_t)scrollSteps, 0 };
+  blehid.inputReport(1, report, sizeof(report));
+}
+
+// ============================================================================
+// Cursor Parking: smoothly moves pointer into bottom-right corner out of view
+// ============================================================================
+void parkMouseCursor() {
+  if (!Bluefruit.connected()) return;
+  // Send 25 reports of maximum positive relative displacement (dx=127, dy=127)
+  // 25 * 127 = 3175 pixels right and down, parking the arrow offscreen / at the edge
+  for (int i = 0; i < 25; i++) {
+    uint8_t report[5] = { 0, 127, 127, 0, 0 };
+    blehid.inputReport(1, report, sizeof(report));
+    delay(4);
+  }
 }
 
 // ============================================================================
@@ -290,10 +329,11 @@ void printHelp() {
   Serial.println(F("--- Doomscroller Serial Commands ---"));
   Serial.println(F("  status         - Show current status and settings"));
   Serial.println(F("  invert         - Toggle scroll direction (invert)"));
-  Serial.println(F("  speed <deg>    - Set degrees per wheel click (e.g. 'speed 10.0')"));
-  Serial.println(F("  accel <gain>   - Set flick acceleration (e.g. 'accel 0.05', 0=off)"));
+  Serial.println(F("  speed <deg>    - Set degrees per wheel click (e.g. 'speed 30.0')"));
+  Serial.println(F("  accel <gain>   - Set flick acceleration (e.g. 'accel 0.02', 0=off)"));
   Serial.println(F("  deadzone <deg> - Set deadzone degrees (e.g. 'deadzone 0.18')"));
   Serial.println(F("  name <str>     - Set Bluetooth device name (e.g. 'name Doomscroller')"));
+  Serial.println(F("  park           - Move mouse cursor off to the bottom-right corner"));
   Serial.println(F("  stream         - Toggle live angle & velocity telemetry"));
   Serial.println(F("  unpair         - Clear all BLE bonding keys and re-advertise"));
   Serial.println(F("  defaults       - Reset settings to factory defaults"));
@@ -308,22 +348,12 @@ void printStatus() {
   Serial.print(F("Firmware:         ")); Serial.println(FIRMWARE_VERSION);
   Serial.print(F("Device Name:      ")); Serial.println(g_settings.deviceName);
   Serial.print(F("BLE Status:       "));
-  if (Bluefruit.connected()) {
-    Serial.println(g_state == STATE_CONNECTED_IDLE ? F("Connected (Idle)") : F("Connected (Active)"));
-  } else {
-    Serial.println(F("Advertising (Pairing Mode)"));
-  }
-  Serial.print(F("Battery:          "));
-  Serial.print(BatteryMonitor::readVoltage(), 2);
-  Serial.print(F("V ("));
-  Serial.print(BatteryMonitor::readPercentage());
-  Serial.println(F("%)"));
+  Serial.println(Bluefruit.connected() ? F("Connected") : F("Advertising (Pairing Mode)"));
   Serial.print(F("Raw Angle:        ")); Serial.println(g_sensor.getRawAngle());
   Serial.print(F("Scroll Direction: ")); Serial.println(g_settings.invertScroll ? F("INVERTED") : F("NORMAL"));
   Serial.print(F("Degrees/Step:     ")); Serial.println(g_settings.degreesPerStep, 2);
   Serial.print(F("Accel Factor:     ")); Serial.println(g_settings.accelFactor, 3);
   Serial.print(F("Deadzone:         ")); Serial.print(g_settings.deadzoneDeg, 2); Serial.println(F("°"));
-  Serial.print(F("Idle Timeout:     ")); Serial.print(g_settings.idleTimeoutSec); Serial.println(F("s"));
   Serial.print(F("Uptime:           ")); Serial.print(millis() / 1000); Serial.println(F("s"));
   Serial.println();
 }
@@ -344,46 +374,44 @@ void handleSerialCLI() {
     printStatus();
   } else if (cmd == "invert") {
     g_settings.invertScroll = !g_settings.invertScroll;
-    settings_save();
     Serial.print(F("Scroll direction inverted: "));
     Serial.println(g_settings.invertScroll ? F("YES") : F("NO"));
   } else if (cmd == "speed" || cmd == "scale") {
     float val = arg.toFloat();
     if (val > 0.5f && val < 100.0f) {
       g_settings.degreesPerStep = val;
-      settings_save();
       Serial.print(F("Degrees per step set to: "));
       Serial.println(val, 2);
     } else {
-      Serial.println(F("Usage: speed <0.5 to 100.0> (e.g. speed 10.0)"));
+      Serial.println(F("Usage: speed <0.5 to 100.0> (e.g. speed 30.0)"));
     }
   } else if (cmd == "accel") {
     float val = arg.toFloat();
     if (val >= 0.0f && val <= 1.0f) {
       g_settings.accelFactor = val;
-      settings_save();
       Serial.print(F("Acceleration factor set to: "));
       Serial.println(val, 3);
     } else {
-      Serial.println(F("Usage: accel <0.0 to 1.0> (e.g. accel 0.05)"));
+      Serial.println(F("Usage: accel <0.0 to 1.0> (e.g. accel 0.02)"));
     }
   } else if (cmd == "deadzone") {
     float val = arg.toFloat();
     if (val >= 0.01f && val <= 5.0f) {
       g_settings.deadzoneDeg = val;
-      settings_save();
       Serial.print(F("Deadzone set to: "));
       Serial.print(val, 2);
       Serial.println(F("°"));
     } else {
       Serial.println(F("Usage: deadzone <0.01 to 5.0>"));
     }
+  } else if (cmd == "park") {
+    parkMouseCursor();
+    Serial.println(F("Cursor parked to bottom-right corner."));
   } else if (cmd == "name") {
     arg.trim();
     if (arg.length() > 0 && arg.length() < 31) {
       strncpy(g_settings.deviceName, arg.c_str(), sizeof(g_settings.deviceName) - 1);
       g_settings.deviceName[sizeof(g_settings.deviceName) - 1] = '\0';
-      settings_save();
       Serial.print(F("Device name updated to '"));
       Serial.print(g_settings.deviceName);
       Serial.println(F("'. Reboot to apply new BLE name."));
@@ -395,12 +423,11 @@ void handleSerialCLI() {
     Serial.print(F("Live telemetry stream: "));
     Serial.println(g_telemetryStream ? F("ON") : F("OFF"));
   } else if (cmd == "unpair" || cmd == "clearbonds") {
-    bond_clear_all();
+    Bluefruit.Periph.clearBonds();
     Serial.println(F("[BLE] All pairing bonds cleared. Re-advertising for fresh pairing."));
     Bluefruit.Advertising.start(0);
   } else if (cmd == "defaults") {
     settings_reset_defaults();
-    settings_save();
     Serial.println(F("Reset to factory defaults."));
     printStatus();
   } else if (cmd == "reboot") {
