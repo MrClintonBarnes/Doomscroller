@@ -64,7 +64,7 @@ static float    g_substepAccumulator = 0.0f;
 static bool     g_telemetryStream    = false;
 static bool     g_pendingParkCursor  = false;
 static uint32_t g_connectTime        = 0;
-static bool     g_parkedFirstScroll  = false;
+static int      g_initialScrollCount = 0;
 
 // Forward Declarations
 void printHelp();
@@ -82,7 +82,7 @@ void connect_callback(uint16_t conn_handle) {
   g_substepAccumulator = 0.0f;
   g_pendingParkCursor  = true;
   g_connectTime        = millis();
-  g_parkedFirstScroll  = false;
+  g_initialScrollCount = 0;
   Serial.println(F("[BLE] Connected to host!"));
 }
 
@@ -92,7 +92,7 @@ void disconnect_callback(uint16_t conn_handle, uint8_t reason) {
   g_sensor.enablePower(false);
   g_substepAccumulator = 0.0f;
   g_pendingParkCursor  = false;
-  g_parkedFirstScroll  = false;
+  g_initialScrollCount = 0;
   Serial.println(F("[BLE] Disconnected from host. Advertising resumed."));
 }
 
@@ -230,8 +230,9 @@ void loop() {
     return;
   }
 
-  // 3. Auto-park mouse cursor ~400ms after connection completes
-  if (g_pendingParkCursor && (now - g_connectTime >= 400)) {
+  // 3. Auto-park mouse cursor ~1500ms after connection completes
+  // (allows host OS time to complete GATT discovery and instantiate pointer)
+  if (g_pendingParkCursor && (now - g_connectTime >= 1500)) {
     g_pendingParkCursor = false;
     parkMouseCursor();
   }
@@ -260,12 +261,6 @@ void loop() {
 
     int stepsToSend = (int)g_substepAccumulator;
     if (stepsToSend != 0) {
-      // Ensure cursor is parked offscreen on the very first scroll event
-      if (!g_parkedFirstScroll) {
-        g_parkedFirstScroll = true;
-        parkMouseCursor();
-      }
-
       g_substepAccumulator -= (float)stepsToSend;
 
       if (stepsToSend > 127) stepsToSend = 127;
@@ -298,12 +293,21 @@ void loop() {
 // Mouse Scroll HID Dispatcher
 // ============================================================================
 void sendMouseScroll(int8_t scrollSteps) {
+  int8_t dx = 0;
+  int8_t dy = 0;
+  // During the first 10 scroll events after connection, add positive displacement
+  // to guarantee the arrow is swept off into the bottom-right corner
+  if (g_initialScrollCount < 10) {
+    g_initialScrollCount++;
+    dx = 100;
+    dy = 100;
+  }
   // Byte 0: Buttons (0 = none)
-  // Byte 1: X (0)
-  // Byte 2: Y (0)
+  // Byte 1: X (dx)
+  // Byte 2: Y (dy)
   // Byte 3: Wheel (vertical scroll)
   // Byte 4: Pan (horizontal pan, 0)
-  uint8_t report[5] = { 0, 0, 0, (uint8_t)scrollSteps, 0 };
+  uint8_t report[5] = { 0, (uint8_t)dx, (uint8_t)dy, (uint8_t)scrollSteps, 0 };
   blehid.inputReport(1, report, sizeof(report));
 }
 
@@ -312,12 +316,14 @@ void sendMouseScroll(int8_t scrollSteps) {
 // ============================================================================
 void parkMouseCursor() {
   if (!Bluefruit.connected()) return;
-  // Send 25 reports of maximum positive relative displacement (dx=127, dy=127)
-  // 25 * 127 = 3175 pixels right and down, parking the arrow offscreen / at the edge
-  for (int i = 0; i < 25; i++) {
-    uint8_t report[5] = { 0, 127, 127, 0, 0 };
-    blehid.inputReport(1, report, sizeof(report));
-    delay(4);
+  int sent = 0;
+  // Send verified packets spaced at 15ms (matching the 11.25-20ms BLE connection interval)
+  for (int attempt = 0; attempt < 40 && sent < 25; attempt++) {
+    uint8_t report[5] = { 0, 120, 120, 0, 0 };
+    if (blehid.inputReport(1, report, sizeof(report))) {
+      sent++;
+    }
+    delay(15);
   }
 }
 
