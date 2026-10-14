@@ -1,0 +1,14 @@
+# OS metadata
+.DS_Store
+Thumbs.db
+
+# Upstream reference clone
+upstream-doomscroller/
+
+# Arduino build artifacts
+*.o
+*.d
+doomscroller/build/*/*.elf
+doomscroller/build/*/*.hex
+doomscroller/build/*/*.map
+doomscroller/build/*/*.zip
