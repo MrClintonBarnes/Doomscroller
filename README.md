@@ -1,9 +1,9 @@
-# Doomscroller Universal Firmware (v2.1-Universal)
+# Doomscroller Universal Firmware (v2.2-Universal)
 
 [![Platform: Seeed XIAO nRF52840 Sense](https://img.shields.io/badge/Platform-Seeed%20XIAO%20nRF52840%20Sense-blue.svg)](https://wiki.seeedstudio.com/XIAO-BLE/)
 [![Sensor: MPS MagAlpha MA780](https://img.shields.io/badge/Sensor-MagAlpha%20MA780%2016--bit-orange.svg)](https://www.monolithicpower.com/en/ma780.html)
 [![Storage: InternalFS LittleFS](https://img.shields.io/badge/Storage-InternalFS%20Flash%20Persistence-purple.svg)](https://learn.adafruit.com/bluefruit-nrf52-feather-learning-guide/internal-file-system)
-[![Configurator: Web Serial API](https://img.shields.io/badge/Configurator-Web%20Serial%20HTML5-teal.svg)](configurator/index.html)
+[![Configurator: Web Serial & Web Bluetooth](https://img.shields.io/badge/Configurator-Web%20Serial%20%26%20BLE-teal.svg)](https://mrclintonbarnes.github.io/Doomscroller/)
 [![Protocol: Driverless BLE HID](https://img.shields.io/badge/BLE-HID%20Mouse%20%2B%20Battery%20Service-green.svg)](https://www.bluetooth.com/)
 [![License: Apache 2.0](https://img.shields.io/badge/License-Apache%202.0-lightgrey.svg)](LICENSE)
 
@@ -17,12 +17,12 @@ Engineered for native compatibility with **Android**, **macOS**, **iOS / iPadOS*
 
 - [The Problem & Why This Firmware Exists](#the-problem--why-this-firmware-exists)
 - [Key Features](#key-features)
-- [Web Serial Configurator GUI](#web-serial-configurator-gui)
+- [Web Configurator GUI (Web Serial & Web Bluetooth)](#web-configurator-gui-web-serial--web-bluetooth)
 - [Multi-Profile Architecture & Flash Persistence](#multi-profile-architecture--flash-persistence)
 - [Hardware Architecture & Pinout](#hardware-architecture--pinout)
 - [Quick Start: Flashing the Firmware](#quick-start-flashing-the-firmware)
 - [Pairing Across Platforms](#pairing-across-platforms)
-- [Interactive Serial CLI Commands](#interactive-serial-cli-commands)
+- [Interactive Serial & BLE CLI Commands](#interactive-serial--ble-cli-commands)
 - [Configuration & Tuning](#configuration--tuning)
 - [Building from Source](#building-from-source)
 - [Troubleshooting & FAQ](#troubleshooting--faq)
@@ -35,19 +35,22 @@ The original upstream Doomscroller firmware attempted to emulate a composite tou
 1. **Passkey / PIN Failure:** Host operating systems (especially Android and macOS) mistook composite HID declarations for a keyboard or secure input terminal, demanding 6-digit PINs or passkeys that a dial cannot enter.
 2. **Accidental Clicks on Social Feeds:** Emulating a touch digitizer finger dragging at fixed screen coordinates caused Android to misinterpret wheel slowdowns as tap/click gestures, accidentally opening posts and ads instead of scrolling.
 3. **No macOS or iOS Support:** Desktop and Apple platforms ignore touch digitizer packets without proprietary drivers.
-4. **Stale Bond Lockouts:** Once paired, changing operating systems or forgetting the device resulted in persistent connection errors (`Doomscroller063` name caching and bonding mismatches).
+4. **Stale Bond Lockouts & Device Latching:** Once paired, changing operating systems or switching between devices resulted in persistent connection errors and hosts aggressively reconnecting before a new device could pair.
 5. **No Native Battery Percentage:** Battery status was not exposed through standard Bluetooth GATT services.
+6. **Overnight Idle Battery Drain:** The angle sensor remained continuously powered during Bluetooth connections even when stationary, draining ~60% of the battery overnight.
 
-### How v2.1-Universal Solves This
+### How v2.2-Universal Solves This
 
 * **Pure BLE HID Mouse Wheel:** Uses standard relative mouse reports (`MotionEvent.ACTION_SCROLL` / generic desktop wheel). Universal support across all platforms out of the box with zero chance of triggering accidental screen taps.
 * **Just-Works Pairing:** Explicitly disables Keyboard and Display I/O capabilities (`setIOCaps(false, false, false)`), guaranteeing instant, PIN-free pairing on Android, macOS, and iOS.
-* **Smart Right-Margin Cursor Auto-Parking:** Solves the mobile video feed dilemma. Android defaults to centering mouse pointers. The firmware automatically glides the cursor smoothly to the far right margin at mid-height ~1.5s after connecting. The center screen (video, faces, subtitles) stays completely clean, while the pointer remains within the active video container (over the Like/Comment column) so TikTok, Instagram Reels, and Shorts scroll 100% reliably.
-* **InternalFS Flash Storage:** Replaces in-memory variables with on-chip LittleFS flash storage (`/settings.dat`). All profile configurations, names, and parameters persist permanently across reboots and battery disconnects.
-* **3 Independent Tuning Profiles:** Instant switching between customized presets (e.g., Profile 1: Balanced, Profile 2: Precision, Profile 3: FastFlick) via Web Serial GUI or Serial CLI.
-* **Web Serial Configurator:** Modern, zero-install graphical web app (`configurator/index.html`) using the Web Serial API to tune sliders, rename profiles, test cursor parking, and reboot with a single click in Chrome/Edge/Opera.
+* **Per-Profile Cursor Auto-Park Toggle:** Smoothly glides the mouse cursor to the far right margin ~1.5s post-connect so the center screen stays completely clean on mobile video feeds (TikTok, Instagram Reels, Shorts). Can be toggled **OFF** per profile for PC and Mac desktop use.
+* **Dual Web Configurator (Web Serial & Web Bluetooth):** Zero-install browser interface (`https://mrclintonbarnes.github.io/Doomscroller/`) supporting both wired USB-C Serial and wireless Web Bluetooth over Nordic UART Service (NUS).
+* **Real-Time Disconnect Detection:** The web configurator monitors both USB unplug events and BLE GATT drops, immediately resetting connection status and disabling controls.
+* **Anti-Latching Multi-Host Bluetooth Identity:** Each of the 3 profiles uses a distinct static Bluetooth MAC address. Switching profiles or entering fresh pairing mode (`pair`) severs the old host connection so new devices can pair cleanly without needing to "Forget Device" on the old phone.
+* **Connected Idle Sleep (~150x Power Reduction):** After 15 seconds of inactivity, the firmware cuts power to the MagAlpha MA780 sensor and throttles the MCU to 100ms low-power polling ticks, eliminating overnight battery drain.
+* **InternalFS Flash Storage:** All profile parameters, names, and toggles persist permanently across power cycles and reboots via on-chip LittleFS (`/settings.dat`).
 * **Native Battery Service (0x180F):** Safely samples the Seeed XIAO internal voltage divider and reports live battery level (0–100%) directly to Android and macOS Bluetooth menus.
-* **Hardware Magnetic Reset ("C"):** Swiping a magnet over the letter "C" on the back PCB clears all stored bonding keys, increments the random static Bluetooth MAC address, and gives 5 blue LED flashes. This forces all nearby host devices to discover the Doomscroller as a brand-new device without stale bond conflicts.
+* **Hardware Magnetic Reset ("C"):** Swiping a magnet over the letter "C" on the back PCB clears all stored bonding keys, increments the Bluetooth MAC address, and gives 5 blue LED flashes.
 
 ---
 
@@ -56,20 +59,21 @@ The original upstream Doomscroller firmware attempted to emulate a composite tou
 | Feature | Description |
 | :--- | :--- |
 | **Driverless Operation** | Standard Bluetooth Low Energy HID Mouse descriptor recognized natively by every major operating system. |
-| **Edge-Parked Pointer** | Cursor slides unobtrusively to the right margin (~1.5s post-connect), keeping video feeds clear while preserving full scrolling in vertical video apps. |
-| **3 Profile Slots** | Switch between independent speed, acceleration, deadzone, and inversion presets stored directly in flash. |
-| **InternalFS Persistence** | Configuration is saved to `/settings.dat` on internal flash via LittleFS so settings survive reboots and power cycles. |
-| **Web Serial Configurator** | Driverless browser-based GUI (`configurator/index.html`) to adjust sliders and toggle settings directly from Chrome/Edge. |
-| **Dynamic Flick Acceleration** | Smooth 1:1 precision (30°/click) during slow turns; automatically scales up to an 8x velocity multiplier on quick flicks for fast browsing. |
-| **Sub-Detent Accumulation** | Carries fractional angle changes across loop cycles so slow, deliberate rotations never get lost in integer division. |
+| **Dual Web Configurator** | Web Serial (USB) and Web Bluetooth (BLE) support side-by-side in Google Chrome, Microsoft Edge, and Opera. |
+| **Connected Idle Sleep** | Shuts down MagAlpha sensor and throttles CPU when motionless (>15s), preventing overnight battery drain. |
+| **Per-Profile Cursor Auto-Park** | Toggle between right-margin mobile video parking (hides pointer) and standard cursor behavior for PC/Mac. |
+| **Host Latching Prevention** | Per-profile MAC address rotation and fresh 60s pairing windows prevent old phones from intercepting connections. |
+| **3 Profile Slots** | Instant switching between customized presets (Phone, Precision, FastFlick) saved to InternalFS flash. |
+| **InternalFS Flash Persistence** | All settings stored in LittleFS on internal flash (`/settings.dat`) surviving battery drain and reboots. |
+| **Dynamic Flick Acceleration** | Smooth 1:1 precision (30°/click) during slow turns; scales up to 8x velocity multiplier on rapid flicks. |
+| **Sub-Detent Accumulation** | Carries fractional angle changes across loop cycles so slow, deliberate rotations are never lost. |
 | **Native Battery Service** | Standard BLE BAS characteristic (`0x180F`) broadcast to system menus without ADC initialization lockups. |
-| **Magnetic Reset & Bootloader** | Single swipe over "C" clears bonds and refreshes BLE identity; double-tap enters UF2 bootloader drive. |
-| **USB Serial CLI & JSON** | Interactive text console and machine-readable JSON output over USB CDC at 115200 baud. |
-| **Ultra-Low Power Standby** | MagAlpha sensor sleeps when Bluetooth disconnects to conserve battery life. |
+| **Hardware Magnetic Reset & Bootloader** | Single swipe over "C" clears bonds and refreshes BLE identity; double-tap enters UF2 bootloader drive. |
+| **Unified Serial & BLE CLI** | Interactive text console and machine-readable JSON output over both USB Serial and Web Bluetooth. |
 
 ---
 
-## Web Serial Configurator GUI
+## Web Configurator GUI (Web Serial & Web Bluetooth)
 
 No command-line or terminal app required! You can configure your Doomscroller directly through your browser over HTTPS:
 
@@ -78,17 +82,18 @@ No command-line or terminal app required! You can configure your Doomscroller di
 *(Or open [`docs/index.html`](docs/index.html) locally in any Chromium browser)*
 
 ### How to Use the Web Configurator:
-1. Open the web configurator in any Chromium-based desktop browser (**Google Chrome**, **Microsoft Edge**, **Opera**, or **Brave**).
-2. Plug your Doomscroller into your computer via USB-C.
-3. Click **"Connect Controller"** in the top right.
-4. Select the Doomscroller serial port (e.g. `Seeed XIAO nRF52840 Sense` or `/dev/cu.usbmodem...`).
-5. The interface will instantly read the firmware state and populate:
+1. Open the web configurator in any Chromium-based desktop or Android browser (**Google Chrome**, **Microsoft Edge**, **Opera**, or **Brave**).
+2. Connect using either method:
+   * **Connect via Bluetooth:** Click **⚡ Connect via Bluetooth** and pick your Doomscroller from the pairing dialog. (100% wireless!)
+   * **Connect via USB:** Plug in via USB-C and click **🔌 Connect via USB**.
+3. The interface will instantly read the controller state and populate:
    * **Profile Tabs:** Select between Profile 1, 2, or 3, or rename them.
    * **Scroll Sensitivity Slider:** Adjust degrees per wheel notch (5° to 90°).
    * **Flick Acceleration Gain:** Adjust speed scaling during fast spins (0.000 to 0.100).
    * **Deadzone Slider:** Fine-tune jitter suppression.
    * **Scroll Inversion:** Instant direction flip toggle.
-   * **Diagnostics:** Live battery voltage/percentage, Bluetooth status, raw angle sensor readout, and one-click DFU bootloader reboot.
+   * **Auto-Park Cursor Toggle:** Enable pointer hiding on mobile, or disable for desktop.
+   * **Quick Tools:** Slide cursor to edge/center, force 60s pairing mode, disconnect host, reboot to UF2 bootloader, or save to flash.
 
 All changes made in the web UI are automatically written directly to InternalFS flash.
 
@@ -100,20 +105,21 @@ The firmware provides **3 independent profile slots** stored in `DeviceSettings`
 
 ```c
 struct TuningProfile {
-  char  name[16];          // Friendly profile name (e.g. "Balanced", "Precision", "FastFlick")
+  char  name[16];          // Friendly profile name (e.g. "Phone", "Precision", "FastFlick")
   float degreesPerStep;    // Degrees of rotation per scroll notch (e.g. 30.0°)
   float accelFactor;       // Dynamic acceleration multiplier (e.g. 0.020)
   float deadzoneDeg;       // Motion deadzone in degrees (e.g. 0.18°)
   bool  invertScroll;      // Scroll direction toggle
+  bool  cursorPark;        // Auto-park cursor on connect (true = hide pointer on mobile)
 };
 ```
 
 ### Factory Profile Presets:
-- **Profile 1 [Balanced]:** 30.0°/step, 0.020 flick accel, 0.18° deadzone. Optimal everyday browsing feel for Chrome, Bluesky, and social feeds.
-- **Profile 2 [Precision]:** 45.0°/step, 0.005 flick accel, 0.18° deadzone. Slower, deliberate line-by-line reading and code review.
-- **Profile 3 [FastFlick]:** 20.0°/step, 0.040 flick accel, 0.15° deadzone. Rapid, energetic flick-scrolling for TikTok, Instagram Reels, and long timelines.
+- **Profile 1 [Balanced / Phone]:** 30.0°/step, 0.020 flick accel, 0.18° deadzone, `cursorPark = true`. Optimal everyday feel for TikTok, Instagram Reels, Bluesky, and mobile feeds.
+- **Profile 2 [Precision / PC]:** 45.0°/step, 0.005 flick accel, 0.18° deadzone, `cursorPark = false`. Slower, deliberate line-by-line reading, code review, and desktop PC/Mac browsing.
+- **Profile 3 [FastFlick / Phone]:** 20.0°/step, 0.040 flick accel, 0.15° deadzone, `cursorPark = true`. Rapid, energetic flick-scrolling for long timelines.
 
-Switch profiles instantly anytime by entering `profile 1`, `profile 2`, or `profile 3` in the serial console, or clicking the tabs in the Web Configurator.
+Switch profiles instantly anytime by entering `profile 1`, `profile 2`, or `profile 3` in the console, or clicking the tabs in the Web Configurator.
 
 ---
 
@@ -129,7 +135,7 @@ Built on the **Seeed Studio XIAO nRF52840 Sense** paired with the **Monolithic P
 | **MagAlpha MA780** | MISO | D9 | P0.15 | SPI Master In / Slave Out |
 | **MagAlpha MA780** | MOSI | D10 | P0.17 | SPI Master Out / Slave In |
 | **MagAlpha MA780** | CS | D7 | P0.20 | Active-low Chip Select |
-| **MagAlpha MA780** | PWR | D6 | P0.04 | Sensor VCC Power Control (HIGH = ON) |
+| **MagAlpha MA780** | PWR | D6 | P0.04 | Sensor VCC Power Control (HIGH = ON, LOW = Low Power Sleep) |
 | **Battery Divider** | VBAT_SENSE | D32 | P0.31 / AIN7 | Analog input for voltage divider (1.51MΩ / 510kΩ) |
 | **Battery Divider** | VBAT_ENABLE | D14 | P0.14 | Low-side FET switch (LOW = Enable divider, HIGH = Off) |
 | **RGB LED** | Red | PIN_LED_RED | P0.26 | Active-low on-board indicator |
@@ -146,10 +152,10 @@ Pre-compiled binary: `doomscroller/build/Seeeduino.nrf52.xiaonRF52840Sense/dooms
 ### Method A: Drag-and-Drop (No Tools Required)
 
 1. Connect the Doomscroller to your computer via USB-C.
-2. **Double-tap a magnet** over the letter **"C"** on the back PCB (mimics double-clicking a reset button). Alternatively, if connected over serial, type `dfu`.
+2. **Double-tap a magnet** over the letter **"C"** on the back PCB (mimics double-clicking a reset button). Alternatively, if connected over serial or web configurator, type or click `dfu`.
 3. The on-board LED will begin a slow, breathing pulse, and a USB mass storage drive named **`XIAO-SENSE`** or **`XIAO-BOOT`** will appear on your desktop.
 4. Drag and drop `doomscroller.uf2` onto the drive.
-5. The device will write the firmware, disconnect, and reboot automatically into v2.0-Universal. *(Any OS warning that "The disk was not ejected properly" is normal and confirms successful reboot).*
+5. The device will write the firmware, disconnect, and reboot automatically into v2.2-Universal. *(Any OS warning that "The disk was not ejected properly" is normal and confirms successful reboot).*
 
 ### Method B: Automated Python Flash Monitor
 
@@ -157,7 +163,7 @@ From the project root directory, run:
 ```bash
 python3 doomscroller/flash_monitor.py
 ```
-Then double-tap the magnet over the letter "C". The script will automatically detect the drive the moment it mounts, copy the UF2 file, and verify completion.
+Then double-tap the magnet over the letter "C" or click `dfu` in the web configurator. The script will automatically detect the drive the moment it mounts, copy the UF2 file, and verify completion.
 
 ---
 
@@ -173,7 +179,7 @@ Then double-tap the magnet over the letter "C". The script will automatically de
 ### macOS
 1. Open **System Settings > Bluetooth**.
 2. Locate **Doomscroller** under *Nearby Devices* and click **Connect**.
-3. Scrolling works instantly. *(If you use macOS "Natural Scrolling" and want the opposite direction, enter `invert` in the USB serial console).*
+3. Scrolling works instantly. *(If you use macOS "Natural Scrolling" and want the opposite direction, enter `invert` in the console or toggle in the web configurator).*
 
 ### iOS & iPadOS
 1. Go to **Settings > Bluetooth** and tap **Doomscroller** to connect.
@@ -184,16 +190,16 @@ Then double-tap the magnet over the letter "C". The script will automatically de
 2. Choose **Doomscroller**. The device pairs immediately as an HID-compliant mouse.
 
 > [!TIP]
-> **Switching Devices / Fresh Pairing:** Whenever pairing with a new device, **swipe the magnet once across the letter "C"**. The blue LED will flash 5 times, clearing stored bonds and rotating the static MAC address so the new host sees a completely fresh device.
+> **Switching Devices / Fresh Pairing:** Whenever pairing with a new device, click **Force 60s Pairing Mode** in the Web Configurator or **swipe the magnet once across the letter "C"**. The blue LED will flash 5 times, clearing stored bonds and rotating the static MAC address so the new host sees a completely fresh device without old devices intercepting.
 
 ---
 
-## Interactive Serial CLI Commands
+## Interactive Serial & BLE CLI Commands
 
-Connect via USB at **115200 baud** using any serial terminal (Arduino Serial Monitor, screen, or minicom):
+Connect via USB at **115200 baud** or over Web Bluetooth Nordic UART Service:
 
 ```text
---- Doomscroller Serial Commands ---
+--- Doomscroller CLI Commands ---
   status         - Show current status and all profile settings
   profile <1-3>  - Switch active tuning profile (e.g. 'profile 1')
   pname <str>    - Rename active profile (e.g. 'pname Social')
@@ -201,6 +207,9 @@ Connect via USB at **115200 baud** using any serial terminal (Arduino Serial Mon
   accel <gain>   - Set flick acceleration for active profile
   deadzone <deg> - Set deadzone degrees for active profile
   invert         - Toggle scroll direction for active profile
+  cursorpark <on/off> - Toggle auto-sliding cursor to right edge on connect
+  pair           - Force 60s fresh pairing window & rotate MAC
+  disconnect     - Disconnect currently connected Bluetooth host
   name <str>     - Set Bluetooth device name
   save           - Explicitly save settings to flash
   edge           - Slide mouse cursor to right margin
@@ -219,11 +228,11 @@ Connect via USB at **115200 baud** using any serial terminal (Arduino Serial Mon
 
 ```text
 --- Device Status ---
-Firmware:         v2.1-Universal
+Firmware:         v2.2-Universal
 Device Name:      Doomscroller
 BLE Status:       Connected
-Battery:          3.60V (10%)
-Raw Angle:        8917
+Battery:          4.12V (85%)
+Raw Angle:        18473
 Active Profile:   1 / 3 [Balanced]
 
 --- Active Profile Tuning ---
@@ -231,11 +240,12 @@ Active Profile:   1 / 3 [Balanced]
   Accel Factor:   0.020
   Deadzone:       0.18°
   Scroll Invert:  NO (Normal)
+  Cursor Auto-Park: YES (Slide to edge)
 
 --- All Profiles ---
- *[1] Balanced: 30.0°/step, accel=0.020, deadzone=0.18°, invert=NO
-  [2] Precision: 45.0°/step, accel=0.005, deadzone=0.18°, invert=NO
-  [3] FastFlick: 20.0°/step, accel=0.040, deadzone=0.15°, invert=NO
+ *[1] Balanced: 30.0°/step, accel=0.020, deadzone=0.18°, invert=NO, park=YES
+  [2] Precision: 45.0°/step, accel=0.005, deadzone=0.18°, invert=NO, park=NO
+  [3] FastFlick: 20.0°/step, accel=0.040, deadzone=0.15°, invert=NO, park=YES
 Uptime:           42s
 ```
 
@@ -246,10 +256,11 @@ Uptime:           42s
 Key tuning parameters are defined in `doomscroller/config.h`:
 
 ```c
-#define DEFAULT_DEGREES_PER_STEP   30.0f  // Degrees of rotation per scroll click (30° feels like a traditional mouse wheel detent)
-#define DEFAULT_ACCEL_FACTOR       0.02f  // Dynamic acceleration gain for fast flicks (0.0 = linear)
+#define DEFAULT_DEGREES_PER_STEP   30.0f  // Degrees of rotation per scroll click
+#define DEFAULT_ACCEL_FACTOR       0.02f  // Dynamic acceleration gain for fast flicks
 #define DEFAULT_DEADZONE_DEG       0.18f  // Deadzone filter in degrees to prevent resting vibration drift
 #define DEFAULT_INVERT_SCROLL      false  // Scroll direction toggle
+#define DEFAULT_IDLE_TIMEOUT_SEC   15     // Seconds before entering ultra-low power sensor sleep
 ```
 
 - **Scroll Speed:** Lower values = faster scrolling (more scroll packets per revolution). Higher values = slower, finer control.
@@ -296,13 +307,16 @@ python3 ~/Library/Arduino15/packages/Seeeduino/hardware/nrf52/1.1.13/tools/uf2co
 **Solution:** Swipe the magnet once across the letter "C" on the back PCB. The blue LED will blink 5 times, wiping all bonds and rotating the static MAC address. On your phone, tap "Forget Device" and pair fresh.
 
 ### Q: Why does the cursor jump to the right side on Android?
-**Answer:** This is an intentional feature. Android spawns mouse pointers in the dead-center of the screen. Because full-screen vertical video apps (TikTok, Instagram Reels) only process scroll events when the cursor is over the active video container, moving the cursor to the bottom corner breaks scrolling. Moving it horizontally to the right margin keeps it hovering over the Like/Comment icon column—clearing the center of your screen while ensuring 100% reliable scrolling.
+**Answer:** This is an intentional feature. Android spawns mouse pointers in the dead-center of the screen. Because full-screen vertical video apps (TikTok, Instagram Reels) only process scroll events when the cursor is over the active video container, moving the cursor to the bottom corner breaks scrolling. Moving it horizontally to the right margin keeps it hovering over the Like/Comment icon column—clearing the center of your screen while ensuring 100% reliable scrolling. If you prefer the cursor to stay where it is (e.g. on PC or Mac), toggle **Auto-Park Cursor** to OFF for that profile in the Web Configurator.
+
+### Q: How do I connect to a new device without my old phone stealing the connection?
+**Answer:** In the Web Configurator, click **Force 60s Fresh Pairing Window** or enter `pair` in the console. You can also switch to another profile (e.g. Profile 2) which uses an independent MAC address, or swipe a magnet across the letter "C".
 
 ### Q: The scrolling direction feels backwards on my computer
-**Solution:** Open the USB serial console at 115200 baud and type `invert`. Alternatively, toggle "Natural Scrolling" in your operating system's mouse settings.
+**Solution:** Open the Web Configurator and flip the **Invert Scroll Direction** switch, or type `invert` in the console.
 
 ### Q: How do I know when the battery is low?
-**Answer:** Check the Bluetooth device list on your phone or Mac. The battery percentage is reported natively via BLE Battery Service (BAS). You can also type `battery` in the serial console to read the raw voltage (e.g. `3.60V (10%)`).
+**Answer:** Check the Bluetooth device list on your phone or Mac. The battery percentage is reported natively via BLE Battery Service (BAS). You can also type `battery` in the serial or BLE console to read the raw voltage (e.g. `4.12V (85%)`).
 
 ---
 

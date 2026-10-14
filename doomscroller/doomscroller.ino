@@ -5,6 +5,7 @@
 
 // ============================================================================
 // Battery Hardware Definitions (Seeed XIAO nRF52840 Sense)
+// ============================================================================
 #ifndef PIN_VBAT
 #define PIN_VBAT         32   // D32 / P0.31 - Analog input for battery voltage
 #endif
@@ -19,6 +20,7 @@
 BLEDis        bledis;                 // Device Information Service
 BLEBas        blebas;                 // Battery Service (0x180F)
 BLEHidGeneric blehid = BLEHidGeneric(1, 0, 0); // 1 Input Report (Mouse), 0 Output, 0 Feature
+BLEUart       bleuart;                // Nordic UART Service (NUS) for wireless Web Bluetooth
 
 // ============================================================================
 // Standard BLE HID Mouse Report Descriptor (Universal Cross-Platform)
@@ -76,12 +78,17 @@ static bool     g_telemetryStream    = false;
 static uint32_t g_lastBatteryCheck   = 0;
 static bool     g_pendingParkEdge    = false;
 static uint32_t g_connectTime        = 0;
+static uint32_t g_lastActivityTime   = 0;
+static bool     g_isIdle             = false;
 
 // Forward Declarations
-void printHelp();
-void printStatus();
-void printJsonStatus();
-void handleSerialCLI();
+void printHelp(Stream& io);
+void printStatus(Stream& io);
+void printJsonStatus(Stream& io);
+void handleStreamCLI(Stream& io);
+void processCommand(Stream& io, String line);
+void switchProfile(uint8_t newProfile, Stream& io);
+void updateBleAddress();
 void sendMouseScroll(int8_t scrollSteps);
 void parkMouseEdge();
 void parkMouseCenter();
@@ -97,6 +104,8 @@ void connect_callback(uint16_t conn_handle) {
   g_substepAccumulator = 0.0f;
   g_pendingParkEdge    = true;
   g_connectTime        = millis();
+  g_lastActivityTime   = millis();
+  g_isIdle             = false;
   Serial.println(F("[BLE] Connected to host!"));
 }
 
@@ -106,7 +115,24 @@ void disconnect_callback(uint16_t conn_handle, uint8_t reason) {
   g_sensor.enablePower(false);
   g_substepAccumulator = 0.0f;
   g_pendingParkEdge    = false;
+  g_isIdle             = false;
   Serial.println(F("[BLE] Disconnected from host. Advertising resumed."));
+}
+
+// ============================================================================
+// Bluetooth Identity Management: Per-Profile Unique MAC
+// ============================================================================
+// Assigns a unique MAC offset to each profile slot. When the user switches
+// to Profile 2 (PC), the Phone (paired to Profile 1) won't hijack the connection!
+void updateBleAddress() {
+  uint8_t resetCount = NRF_POWER->GPREGRET;
+  ble_gap_addr_t gap_addr;
+  if (sd_ble_gap_addr_get(&gap_addr) == NRF_SUCCESS) {
+    gap_addr.addr_type = BLE_GAP_ADDR_TYPE_RANDOM_STATIC;
+    gap_addr.addr[0] += (resetCount * 3) + g_settings.activeProfile + 1;
+    gap_addr.addr[5] |= 0xC0; // Standard BLE random static address requirement
+    sd_ble_gap_addr_set(&gap_addr);
+  }
 }
 
 // ============================================================================
@@ -128,10 +154,11 @@ void setup() {
   NRF_POWER->RESETREAS = 0xFFFFFFFF; // Clear reset register flags
   bool isMagneticReset = (resetReason & POWER_RESETREAS_RESETPIN_Msk) != 0;
 
-  // Initialize Settings in RAM
+  // Initialize Settings from InternalFS flash
   settings_init();
 
-  // Initialize Bluefruit BLE Peripheral (1 peripheral, 0 centrals)
+  // Configure high-bandwidth peripheral mode for simultaneous HID + BLE UART
+  Bluefruit.configPrphBandwidth(BANDWIDTH_MAX);
   Bluefruit.begin(1, 0);
   Bluefruit.setTxPower(4); // +4 dBm maximum transmission power
   Bluefruit.setName(g_settings.deviceName);
@@ -159,22 +186,14 @@ void setup() {
     digitalWrite(PIN_LED_GREEN, 1 - LED_STATE_ON);
   }
 
-  // Set fresh random static BLE identity address
-  // This completely eliminates stale pairing caches ("Doomscroller063") and Android PIN errors
-  ble_gap_addr_t gap_addr;
-  if (sd_ble_gap_addr_get(&gap_addr) == NRF_SUCCESS) {
-    gap_addr.addr_type = BLE_GAP_ADDR_TYPE_RANDOM_STATIC;
-    gap_addr.addr[0] += (resetCount + 1);
-    gap_addr.addr[5] |= 0xC0; // Standard BLE random static address requirement
-    sd_ble_gap_addr_set(&gap_addr);
-  }
+  // Set fresh per-profile static BLE identity address
+  updateBleAddress();
 
   // Security configuration: unauthenticated Just-Works pairing with encryption
-  // Explicitly disables Keyboard and Display caps so hosts NEVER request a passkey/PIN
   Bluefruit.Security.setIOCaps(false, false, false);
   Bluefruit.Security.setMITM(false);
 
-  // Connection Interval: 11.25ms (9 * 1.25ms) to 20ms (16 * 1.25ms)
+  // Connection Interval: 11.25ms to 20ms
   Bluefruit.Periph.setConnInterval(9, 16);
 
   // Connection event callbacks
@@ -190,8 +209,11 @@ void setup() {
   // Battery Service (BLE Standard 0x180F)
   blebas.begin();
 
+  // Nordic UART Service (for Web Bluetooth Configurator)
+  bleuart.begin();
+
   // BLE HID Generic Service (Pure Mouse)
-  uint16_t input_report_lengths[] = { 5 }; // 5 bytes: Buttons(1), X(1), Y(1), Wheel(1), Pan(1)
+  uint16_t input_report_lengths[] = { 5 }; // Buttons(1), X(1), Y(1), Wheel(1), Pan(1)
   blehid.setReportMap(hid_report_descriptor, sizeof(hid_report_descriptor));
   blehid.setReportLen(input_report_lengths, NULL, NULL);
   blehid.enableMouse(true);
@@ -203,12 +225,13 @@ void setup() {
   Bluefruit.Advertising.addAppearance(BLE_APPEARANCE_HID_MOUSE);
   Bluefruit.Advertising.addService(blehid);
   Bluefruit.Advertising.addName();
+  Bluefruit.ScanResponse.addService(bleuart); // Nordic UART Service in Scan Response
   Bluefruit.Advertising.restartOnDisconnect(true);
-  Bluefruit.Advertising.setInterval(32, 244); // 20ms fast mode, 152.5ms slow mode
-  Bluefruit.Advertising.setFastTimeout(60);   // 60 seconds in fast mode
-  Bluefruit.Advertising.start(0);             // Advertise indefinitely until connected
+  Bluefruit.Advertising.setInterval(32, 244); // 20ms fast, 152.5ms slow
+  Bluefruit.Advertising.setFastTimeout(60);   // 60 seconds fast
+  Bluefruit.Advertising.start(0);
 
-  // Automatic connection LED: blinks Blue LED inside USB-C during advertising, solid ON when connected
+  // Automatic connection LED
   Bluefruit.autoConnLed(true);
 
   // Initialize MagAlpha Sensor SPI bus
@@ -217,14 +240,15 @@ void setup() {
   Serial.println();
   Serial.println(F("========================================"));
   Serial.println(F("  DOOMSCROLLER UNIVERSAL FIRMWARE " FIRMWARE_VERSION));
-  Serial.println(F("  Cross-Platform BLE Scroll Controller  "));
+  Serial.println(F("  Cross-Platform BLE & Web Bluetooth    "));
   Serial.println(F("========================================"));
-  Serial.print(F("Device Name: "));
-  Serial.println(g_settings.deviceName);
+  Serial.print(F("Device Name:    ")); Serial.println(g_settings.deviceName);
+  Serial.print(F("Active Profile: [")); Serial.print(g_settings.activeProfile + 1);
+  Serial.print(F("] ")); Serial.println(getActiveProfile().name);
   if (isMagneticReset) {
     Serial.println(F("[System] Magnetic reset detected. Bonds wiped, address refreshed."));
   }
-  Serial.println(F("Ready to pair."));
+  Serial.println(F("Ready to connect."));
 }
 
 // ============================================================================
@@ -235,32 +259,56 @@ void loop() {
 
   // 1. Process Serial CLI commands if connected to USB
   if (Serial.available()) {
-    handleSerialCLI();
+    handleStreamCLI(Serial);
   }
 
-  // 2. When not connected to Bluetooth, put sensor to sleep to conserve battery
+  // 2. Process BLE UART commands if connected over Web Bluetooth
+  if (bleuart.available()) {
+    handleStreamCLI(bleuart);
+  }
+
+  // 3. When not connected to Bluetooth, put sensor to sleep to conserve battery
   if (!Bluefruit.connected()) {
     g_sensor.enablePower(false);
     g_substepAccumulator = 0.0f;
+    g_isIdle = false;
     delay(20);
     return;
   }
 
-  // 3. Auto-slide cursor to right edge ~1500ms after connection
-  // (clears center screen while keeping pointer inside TikTok/Instagram video viewport)
+  // 4. Auto-slide cursor to right edge ~1500ms after connection if enabled for active profile
   if (g_pendingParkEdge && (now - g_connectTime >= 1500)) {
     g_pendingParkEdge = false;
-    parkMouseEdge();
+    if (getActiveProfile().cursorPark) {
+      parkMouseEdge();
+    }
   }
 
-  // 4. Periodic Battery Monitoring (every 60s while connected)
+  // 5. Periodic Battery Monitoring (every 60s while connected)
   if (now - g_lastBatteryCheck >= 60000 || (g_lastBatteryCheck == 0 && now >= 3000)) {
     g_lastBatteryCheck = now;
     uint8_t pct = readBatteryPercentage();
     blebas.write(pct);
   }
 
-  // 5. Connected: sample encoder at 100Hz (10ms)
+  // 6. Connected Idle Sleep: after 15 seconds of inactivity, enter ultra-low power sleep
+  TuningProfile& prof = getActiveProfile();
+  if (g_isIdle) {
+    // Poll sensor every 100ms with checkIdleWakeup
+    // MagAlpha is powered OFF between polls, CPU enters low-power sleep
+    if (g_sensor.checkIdleWakeup(prof.deadzoneDeg * 1.5f)) {
+      // Motion detected! Wake up immediately
+      g_isIdle = false;
+      g_lastActivityTime = now;
+      g_sensor.enablePower(true);
+      g_sensor.resetState();
+    } else {
+      delay(IDLE_POLL_INTERVAL_MS);
+      return;
+    }
+  }
+
+  // 7. Active Sampling at 100Hz (10ms)
   float deltaDeg = 0.0f;
   float velocity = 0.0f;
   if (!g_sensor.update(deltaDeg, velocity)) {
@@ -268,9 +316,9 @@ void loop() {
     return;
   }
 
-  TuningProfile& prof = getActiveProfile();
   float absVel = fabsf(velocity);
   if (absVel > prof.deadzoneDeg) {
+    g_lastActivityTime = now;
     float dir = prof.invertScroll ? -1.0f : 1.0f;
     float baseSteps = (deltaDeg / prof.degreesPerStep) * dir;
 
@@ -290,16 +338,17 @@ void loop() {
       if (stepsToSend > 127) stepsToSend = 127;
       if (stepsToSend < -127) stepsToSend = -127;
 
-      // Send standard mouse scroll wheel report (dx=0, dy=0 keeps pointer over video feed)
       sendMouseScroll((int8_t)stepsToSend);
 
       if (g_telemetryStream) {
-        Serial.print(F("Delta: "));
-        Serial.print(deltaDeg, 2);
-        Serial.print(F("°\tVel: "));
-        Serial.print(velocity, 1);
-        Serial.print(F("°/s\tSteps: "));
-        Serial.println(stepsToSend);
+        Serial.print(F("Delta: ")); Serial.print(deltaDeg, 2);
+        Serial.print(F("°\tVel: ")); Serial.print(velocity, 1);
+        Serial.print(F("°/s\tSteps: ")); Serial.println(stepsToSend);
+        if (Bluefruit.connected()) {
+          bleuart.print(F("Delta: ")); bleuart.print(deltaDeg, 2);
+          bleuart.print(F("°\tVel: ")); bleuart.print(velocity, 1);
+          bleuart.print(F("°/s\tSteps: ")); bleuart.println(stepsToSend);
+        }
       }
     }
   } else {
@@ -307,6 +356,12 @@ void loop() {
     g_substepAccumulator *= 0.5f;
     if (fabsf(g_substepAccumulator) < 0.05f) {
       g_substepAccumulator = 0.0f;
+    }
+
+    // Check if 15 seconds have elapsed without motion
+    if (now - g_lastActivityTime > ((uint32_t)DEFAULT_IDLE_TIMEOUT_SEC * 1000)) {
+      g_isIdle = true;
+      g_sensor.enablePower(false);
     }
   }
 
@@ -317,13 +372,6 @@ void loop() {
 // Mouse Scroll HID Dispatcher
 // ============================================================================
 void sendMouseScroll(int8_t scrollSteps) {
-  // Pure scroll wheel with zero X/Y displacement:
-  // Keeps cursor in the active video viewport so TikTok, Instagram, and web feeds scroll 100% reliably
-  // Byte 0: Buttons (0 = none)
-  // Byte 1: X (0)
-  // Byte 2: Y (0)
-  // Byte 3: Wheel (vertical scroll)
-  // Byte 4: Pan (horizontal pan, 0)
   uint8_t report[5] = { 0, 0, 0, (uint8_t)scrollSteps, 0 };
   blehid.inputReport(1, report, sizeof(report));
 }
@@ -361,7 +409,7 @@ void parkMouseCenter() {
 float readBatteryVoltage() {
   pinMode(PIN_VBAT_ENABLE, OUTPUT);
   digitalWrite(PIN_VBAT_ENABLE, LOW); // Enable divider
-  delay(5); // Allow divider voltage to settle
+  delay(5);
 
   analogReference(AR_INTERNAL_3_0); // 3.0V reference
   analogReadResolution(12);         // 12-bit (0..4095)
@@ -372,7 +420,6 @@ float readBatteryVoltage() {
 
   digitalWrite(PIN_VBAT_ENABLE, HIGH); // Disable divider to save battery
 
-  // Voltage divider ratio: 1510k / 510k approx
   float voltage = (raw * 3.0f / 4095.0f) * (1510.0f / 510.0f);
   return voltage;
 }
@@ -389,161 +436,189 @@ uint8_t readBatteryPercentage() {
 }
 
 // ============================================================================
-// Serial CLI & Configuration
+// Profile Channel Switching
 // ============================================================================
-void printHelp() {
-  Serial.println();
-  Serial.println(F("--- Doomscroller Serial Commands ---"));
-  Serial.println(F("  status         - Show current status and all profile settings"));
-  Serial.println(F("  profile <1-3>  - Switch active tuning profile (e.g. 'profile 1')"));
-  Serial.println(F("  pname <str>    - Rename active profile (e.g. 'pname Social')"));
-  Serial.println(F("  speed <deg>    - Set degrees per click for active profile"));
-  Serial.println(F("  accel <gain>   - Set flick acceleration for active profile"));
-  Serial.println(F("  deadzone <deg> - Set deadzone degrees for active profile"));
-  Serial.println(F("  invert         - Toggle scroll direction for active profile"));
-  Serial.println(F("  name <str>     - Set Bluetooth device name"));
-  Serial.println(F("  save           - Explicitly save settings to flash"));
-  Serial.println(F("  edge           - Slide mouse cursor to right margin"));
-  Serial.println(F("  center         - Move mouse cursor back towards center"));
-  Serial.println(F("  battery        - Read battery voltage and estimated percentage"));
-  Serial.println(F("  json           - Output machine-readable JSON status"));
-  Serial.println(F("  dfu            - Reboot into UF2 bootloader drive for flashing"));
-  Serial.println(F("  stream         - Toggle live angle & velocity telemetry"));
-  Serial.println(F("  unpair         - Clear all BLE bonding keys and re-advertise"));
-  Serial.println(F("  defaults       - Reset all settings to factory defaults"));
-  Serial.println(F("  reboot         - Reboot controller"));
-  Serial.println(F("  help           - Print this menu"));
-  Serial.println();
-}
+void switchProfile(uint8_t newProfile, Stream& io) {
+  if (newProfile >= NUM_PROFILES) return;
+  bool changed = (g_settings.activeProfile != newProfile);
+  g_settings.activeProfile = newProfile;
+  settings_save();
 
-void printStatus() {
-  Serial.println();
-  Serial.println(F("--- Device Status ---"));
-  Serial.print(F("Firmware:         ")); Serial.println(FIRMWARE_VERSION);
-  Serial.print(F("Device Name:      ")); Serial.println(g_settings.deviceName);
-  Serial.print(F("BLE Status:       "));
-  Serial.println(Bluefruit.connected() ? F("Connected") : F("Advertising (Pairing Mode)"));
-  Serial.print(F("Battery:          "));
-  float v = readBatteryVoltage();
-  Serial.print(v, 2);
-  Serial.print(F("V ("));
-  Serial.print(readBatteryPercentage());
-  Serial.println(F("%)"));
-  Serial.print(F("Raw Angle:        ")); Serial.println(g_sensor.getRawAngle());
-  Serial.print(F("Active Profile:   "));
-  Serial.print(g_settings.activeProfile + 1);
-  Serial.print(F(" / "));
-  Serial.print(NUM_PROFILES);
-  Serial.print(F(" ["));
-  Serial.print(getActiveProfile().name);
-  Serial.println(F("]"));
+  io.print(F("Active profile switched to ["));
+  io.print(newProfile + 1);
+  io.print(F("] "));
+  io.print(getActiveProfile().name);
+  io.println(F(" (Saved to flash)"));
 
-  Serial.println(F("--- Active Profile Tuning ---"));
-  TuningProfile& cur = getActiveProfile();
-  Serial.print(F("  Degrees/Step:   ")); Serial.println(cur.degreesPerStep, 2);
-  Serial.print(F("  Accel Factor:   ")); Serial.println(cur.accelFactor, 3);
-  Serial.print(F("  Deadzone:       ")); Serial.print(cur.deadzoneDeg, 2); Serial.println(F("°"));
-  Serial.print(F("  Scroll Invert:  ")); Serial.println(cur.invertScroll ? F("YES (Inverted)") : F("NO (Normal)"));
-
-  Serial.println(F("--- All Profiles ---"));
-  for (int i = 0; i < NUM_PROFILES; i++) {
-    Serial.print(i == g_settings.activeProfile ? F(" *[") : F("  ["));
-    Serial.print(i + 1);
-    Serial.print(F("] "));
-    Serial.print(g_settings.profiles[i].name);
-    Serial.print(F(": "));
-    Serial.print(g_settings.profiles[i].degreesPerStep, 1);
-    Serial.print(F("°/step, accel="));
-    Serial.print(g_settings.profiles[i].accelFactor, 3);
-    Serial.print(F(", deadzone="));
-    Serial.print(g_settings.profiles[i].deadzoneDeg, 2);
-    Serial.print(F("°, invert="));
-    Serial.println(g_settings.profiles[i].invertScroll ? F("YES") : F("NO"));
+  if (changed) {
+    // Disconnect current host to allow the paired device on the target profile to connect
+    if (Bluefruit.connected()) {
+      io.println(F("[BLE] Switching Bluetooth identity channel..."));
+      delay(50);
+      Bluefruit.disconnect(Bluefruit.connHandle());
+    }
+    updateBleAddress();
+    Bluefruit.Advertising.start(60);
   }
-  Serial.print(F("Uptime:           ")); Serial.print(millis() / 1000); Serial.println(F("s"));
-  Serial.println();
 }
 
-void printJsonStatus() {
+// ============================================================================
+// CLI & Configuration (Universal Stream: Works identically over USB & BLE)
+// ============================================================================
+void printHelp(Stream& io) {
+  io.println();
+  io.println(F("--- Doomscroller Commands ---"));
+  io.println(F("  status         - Show current status and all profile settings"));
+  io.println(F("  profile <1-3>  - Switch active tuning profile (e.g. 'profile 1')"));
+  io.println(F("  pname <str>    - Rename active profile (e.g. 'pname Social')"));
+  io.println(F("  parkmode       - Toggle auto-parking cursor on right edge"));
+  io.println(F("  speed <deg>    - Set degrees per click for active profile"));
+  io.println(F("  accel <gain>   - Set flick acceleration for active profile"));
+  io.println(F("  deadzone <deg> - Set deadzone degrees for active profile"));
+  io.println(F("  invert         - Toggle scroll direction for active profile"));
+  io.println(F("  name <str>     - Set Bluetooth device name"));
+  io.println(F("  save           - Explicitly save settings to flash"));
+  io.println(F("  edge           - Slide mouse cursor to right margin"));
+  io.println(F("  center         - Move mouse cursor back towards center"));
+  io.println(F("  battery        - Read battery voltage and estimated percentage"));
+  io.println(F("  json           - Output machine-readable JSON status"));
+  io.println(F("  disconnect     - Disconnect from currently connected host"));
+  io.println(F("  pair           - Disconnect and enter pairing mode for new device"));
+  io.println(F("  dfu            - Reboot into UF2 bootloader drive for flashing"));
+  io.println(F("  stream         - Toggle live angle & velocity telemetry"));
+  io.println(F("  unpair         - Clear all BLE bonding keys and re-advertise"));
+  io.println(F("  defaults       - Reset all settings to factory defaults"));
+  io.println(F("  reboot         - Reboot controller"));
+  io.println(F("  help           - Print this menu"));
+  io.println();
+}
+
+void printStatus(Stream& io) {
+  io.println();
+  io.println(F("--- Device Status ---"));
+  io.print(F("Firmware:         ")); io.println(FIRMWARE_VERSION);
+  io.print(F("Device Name:      ")); io.println(g_settings.deviceName);
+  io.print(F("BLE Status:       "));
+  io.println(Bluefruit.connected() ? F("Connected") : F("Advertising (Pairing Mode)"));
+  io.print(F("Battery:          "));
+  float v = readBatteryVoltage();
+  io.print(v, 2);
+  io.print(F("V ("));
+  io.print(readBatteryPercentage());
+  io.println(F("%)"));
+  io.print(F("Raw Angle:        ")); io.println(g_sensor.getRawAngle());
+  io.print(F("Active Profile:   "));
+  io.print(g_settings.activeProfile + 1);
+  io.print(F(" / "));
+  io.print(NUM_PROFILES);
+  io.print(F(" ["));
+  io.print(getActiveProfile().name);
+  io.println(F("]"));
+
+  io.println(F("--- Active Profile Tuning ---"));
+  TuningProfile& cur = getActiveProfile();
+  io.print(F("  Degrees/Step:   ")); io.println(cur.degreesPerStep, 2);
+  io.print(F("  Accel Factor:   ")); io.println(cur.accelFactor, 3);
+  io.print(F("  Deadzone:       ")); io.print(cur.deadzoneDeg, 2); io.println(F("°"));
+  io.print(F("  Scroll Invert:  ")); io.println(cur.invertScroll ? F("YES (Inverted)") : F("NO (Normal)"));
+  io.print(F("  Cursor Auto-Park: ")); io.println(cur.cursorPark ? F("YES (Slide to edge)") : F("NO (Keep in place)"));
+
+  io.println(F("--- All Profiles ---"));
+  for (int i = 0; i < NUM_PROFILES; i++) {
+    io.print(i == g_settings.activeProfile ? F(" *[") : F("  ["));
+    io.print(i + 1);
+    io.print(F("] "));
+    io.print(g_settings.profiles[i].name);
+    io.print(F(": "));
+    io.print(g_settings.profiles[i].degreesPerStep, 1);
+    io.print(F("°/step, accel="));
+    io.print(g_settings.profiles[i].accelFactor, 3);
+    io.print(F(", deadzone="));
+    io.print(g_settings.profiles[i].deadzoneDeg, 2);
+    io.print(F("°, invert="));
+    io.print(g_settings.profiles[i].invertScroll ? F("YES") : F("NO"));
+    io.print(F(", park="));
+    io.println(g_settings.profiles[i].cursorPark ? F("YES") : F("NO"));
+  }
+  io.print(F("Uptime:           ")); io.print(millis() / 1000); io.println(F("s"));
+  io.println();
+}
+
+void printJsonStatus(Stream& io) {
   float v = readBatteryVoltage();
   uint8_t pct = readBatteryPercentage();
-  Serial.print(F("{\"version\":"));
-  Serial.print(g_settings.version);
-  Serial.print(F(",\"fw\":\"" FIRMWARE_VERSION "\""));
-  Serial.print(F(",\"name\":\""));
-  Serial.print(g_settings.deviceName);
-  Serial.print(F("\",\"connected\":"));
-  Serial.print(Bluefruit.connected() ? F("true") : F("false"));
-  Serial.print(F(",\"batteryV\":"));
-  Serial.print(v, 2);
-  Serial.print(F(",\"batteryPct\":"));
-  Serial.print(pct);
-  Serial.print(F(",\"rawAngle\":"));
-  Serial.print(g_sensor.getRawAngle());
-  Serial.print(F(",\"activeProfile\":"));
-  Serial.print(g_settings.activeProfile);
-  Serial.print(F(",\"profiles\":["));
+  io.print(F("{\"version\":"));
+  io.print(g_settings.version);
+  io.print(F(",\"fw\":\"" FIRMWARE_VERSION "\""));
+  io.print(F(",\"name\":\""));
+  io.print(g_settings.deviceName);
+  io.print(F("\",\"connected\":"));
+  io.print(Bluefruit.connected() ? F("true") : F("false"));
+  io.print(F(",\"batteryV\":"));
+  io.print(v, 2);
+  io.print(F(",\"batteryPct\":"));
+  io.print(pct);
+  io.print(F(",\"rawAngle\":"));
+  io.print(g_sensor.getRawAngle());
+  io.print(F(",\"activeProfile\":"));
+  io.print(g_settings.activeProfile);
+  io.print(F(",\"profiles\":["));
   for (int i = 0; i < NUM_PROFILES; i++) {
-    if (i > 0) Serial.print(',');
-    Serial.print(F("{\"id\":"));
-    Serial.print(i);
-    Serial.print(F(",\"name\":\""));
-    Serial.print(g_settings.profiles[i].name);
-    Serial.print(F("\",\"speed\":"));
-    Serial.print(g_settings.profiles[i].degreesPerStep, 2);
-    Serial.print(F(",\"accel\":"));
-    Serial.print(g_settings.profiles[i].accelFactor, 3);
-    Serial.print(F(",\"deadzone\":"));
-    Serial.print(g_settings.profiles[i].deadzoneDeg, 2);
-    Serial.print(F(",\"invert\":"));
-    Serial.print(g_settings.profiles[i].invertScroll ? F("true") : F("false"));
-    Serial.print(F("}"));
+    if (i > 0) io.print(',');
+    io.print(F("{\"id\":"));
+    io.print(i);
+    io.print(F(",\"name\":\""));
+    io.print(g_settings.profiles[i].name);
+    io.print(F("\",\"speed\":"));
+    io.print(g_settings.profiles[i].degreesPerStep, 2);
+    io.print(F(",\"accel\":"));
+    io.print(g_settings.profiles[i].accelFactor, 3);
+    io.print(F(",\"deadzone\":"));
+    io.print(g_settings.profiles[i].deadzoneDeg, 2);
+    io.print(F(",\"invert\":"));
+    io.print(g_settings.profiles[i].invertScroll ? F("true") : F("false"));
+    io.print(F(",\"cursorPark\":"));
+    io.print(g_settings.profiles[i].cursorPark ? F("true") : F("false"));
+    io.print(F("}"));
   }
-  Serial.println(F("]}"));
+  io.println(F("]}"));
 }
 
-void handleSerialCLI() {
-  String line = Serial.readStringUntil('\n');
+void handleStreamCLI(Stream& io) {
+  String line = io.readStringUntil('\n');
   line.trim();
   if (line.length() == 0) return;
+  processCommand(io, line);
+}
 
+void processCommand(Stream& io, String line) {
   int spaceIdx = line.indexOf(' ');
   String cmd = (spaceIdx == -1) ? line : line.substring(0, spaceIdx);
   String arg = (spaceIdx == -1) ? "" : line.substring(spaceIdx + 1);
   cmd.toLowerCase();
 
   if (cmd == "help") {
-    printHelp();
+    printHelp(io);
   } else if (cmd == "status") {
-    printStatus();
+    printStatus(io);
   } else if (cmd == "json") {
-    printJsonStatus();
+    printJsonStatus(io);
   } else if (cmd == "profile") {
     arg.trim();
     if (arg.length() > 0) {
       int pNum = arg.toInt();
       if (pNum >= 1 && pNum <= NUM_PROFILES) {
-        g_settings.activeProfile = (uint8_t)(pNum - 1);
-        settings_save();
-        Serial.print(F("Active profile switched to ["));
-        Serial.print(pNum);
-        Serial.print(F("] "));
-        Serial.print(getActiveProfile().name);
-        Serial.println(F(" (Saved to flash)"));
+        switchProfile((uint8_t)(pNum - 1), io);
       } else if (pNum == 0 && arg == "0") {
-        g_settings.activeProfile = 0;
-        settings_save();
-        Serial.print(F("Active profile switched to [1] "));
-        Serial.print(getActiveProfile().name);
-        Serial.println(F(" (Saved to flash)"));
+        switchProfile(0, io);
       } else {
-        Serial.println(F("Usage: profile <1 to 3> (e.g. 'profile 1')"));
+        io.println(F("Usage: profile <1 to 3> (e.g. 'profile 1')"));
       }
     } else {
-      Serial.print(F("Current profile: ["));
-      Serial.print(g_settings.activeProfile + 1);
-      Serial.print(F("] "));
-      Serial.println(getActiveProfile().name);
+      io.print(F("Current profile: ["));
+      io.print(g_settings.activeProfile + 1);
+      io.print(F("] "));
+      io.println(getActiveProfile().name);
     }
   } else if (cmd == "pname") {
     arg.trim();
@@ -551,66 +626,81 @@ void handleSerialCLI() {
       strncpy(getActiveProfile().name, arg.c_str(), sizeof(getActiveProfile().name) - 1);
       getActiveProfile().name[sizeof(getActiveProfile().name) - 1] = '\0';
       settings_save();
-      Serial.print(F("Active profile renamed to '"));
-      Serial.print(getActiveProfile().name);
-      Serial.println(F("' (Saved to flash)"));
+      io.print(F("Active profile renamed to '"));
+      io.print(getActiveProfile().name);
+      io.println(F("' (Saved to flash)"));
     } else {
-      Serial.println(F("Usage: pname <1-15 chars>"));
+      io.println(F("Usage: pname <1-15 chars>"));
     }
+  } else if (cmd == "parkmode" || cmd == "cursorpark") {
+    TuningProfile& prof = getActiveProfile();
+    arg.toLowerCase();
+    if (arg == "on" || arg == "true" || arg == "1") {
+      prof.cursorPark = true;
+    } else if (arg == "off" || arg == "false" || arg == "0") {
+      prof.cursorPark = false;
+    } else {
+      prof.cursorPark = !prof.cursorPark;
+    }
+    settings_save();
+    io.print(F("Cursor auto-parking for ["));
+    io.print(prof.name);
+    io.print(F("]: "));
+    io.println(prof.cursorPark ? F("ENABLED (Saved to flash)") : F("DISABLED (Saved to flash)"));
   } else if (cmd == "battery") {
     float v = readBatteryVoltage();
     uint8_t p = readBatteryPercentage();
-    Serial.print(F("Battery: "));
-    Serial.print(v, 3);
-    Serial.print(F(" V ("));
-    Serial.print(p);
-    Serial.println(F("%)"));
+    io.print(F("Battery: "));
+    io.print(v, 3);
+    io.print(F(" V ("));
+    io.print(p);
+    io.println(F("%)"));
   } else if (cmd == "invert") {
     TuningProfile& prof = getActiveProfile();
     prof.invertScroll = !prof.invertScroll;
     settings_save();
-    Serial.print(F("Scroll direction for ["));
-    Serial.print(prof.name);
-    Serial.print(F("]: "));
-    Serial.println(prof.invertScroll ? F("INVERTED (Saved to flash)") : F("NORMAL (Saved to flash)"));
+    io.print(F("Scroll direction for ["));
+    io.print(prof.name);
+    io.print(F("]: "));
+    io.println(prof.invertScroll ? F("INVERTED (Saved to flash)") : F("NORMAL (Saved to flash)"));
   } else if (cmd == "speed" || cmd == "scale") {
     float val = arg.toFloat();
     if (val > 0.5f && val < 100.0f) {
       getActiveProfile().degreesPerStep = val;
       settings_save();
-      Serial.print(F("Degrees per step for ["));
-      Serial.print(getActiveProfile().name);
-      Serial.print(F("] set to: "));
-      Serial.print(val, 2);
-      Serial.println(F(" (Saved to flash)"));
+      io.print(F("Degrees per step for ["));
+      io.print(getActiveProfile().name);
+      io.print(F("] set to: "));
+      io.print(val, 2);
+      io.println(F(" (Saved to flash)"));
     } else {
-      Serial.println(F("Usage: speed <0.5 to 100.0> (e.g. speed 30.0)"));
+      io.println(F("Usage: speed <0.5 to 100.0> (e.g. speed 30.0)"));
     }
   } else if (cmd == "accel") {
     float val = arg.toFloat();
     if (val >= 0.0f && val <= 1.0f) {
       getActiveProfile().accelFactor = val;
       settings_save();
-      Serial.print(F("Acceleration factor for ["));
-      Serial.print(getActiveProfile().name);
-      Serial.print(F("] set to: "));
-      Serial.print(val, 3);
-      Serial.println(F(" (Saved to flash)"));
+      io.print(F("Acceleration factor for ["));
+      io.print(getActiveProfile().name);
+      io.print(F("] set to: "));
+      io.print(val, 3);
+      io.println(F(" (Saved to flash)"));
     } else {
-      Serial.println(F("Usage: accel <0.0 to 1.0> (e.g. accel 0.02)"));
+      io.println(F("Usage: accel <0.0 to 1.0> (e.g. accel 0.02)"));
     }
   } else if (cmd == "deadzone") {
     float val = arg.toFloat();
     if (val >= 0.01f && val <= 5.0f) {
       getActiveProfile().deadzoneDeg = val;
       settings_save();
-      Serial.print(F("Deadzone for ["));
-      Serial.print(getActiveProfile().name);
-      Serial.print(F("] set to: "));
-      Serial.print(val, 2);
-      Serial.println(F("° (Saved to flash)"));
+      io.print(F("Deadzone for ["));
+      io.print(getActiveProfile().name);
+      io.print(F("] set to: "));
+      io.print(val, 2);
+      io.println(F("° (Saved to flash)"));
     } else {
-      Serial.println(F("Usage: deadzone <0.01 to 5.0>"));
+      io.println(F("Usage: deadzone <0.01 to 5.0>"));
     }
   } else if (cmd == "name") {
     arg.trim();
@@ -618,48 +708,64 @@ void handleSerialCLI() {
       strncpy(g_settings.deviceName, arg.c_str(), sizeof(g_settings.deviceName) - 1);
       g_settings.deviceName[sizeof(g_settings.deviceName) - 1] = '\0';
       settings_save();
-      Serial.print(F("Device name updated to '"));
-      Serial.print(g_settings.deviceName);
-      Serial.println(F("'. Reboot to apply new BLE name. (Saved to flash)"));
+      io.print(F("Device name updated to '"));
+      io.print(g_settings.deviceName);
+      io.println(F("'. Reboot to apply new BLE name. (Saved to flash)"));
     } else {
-      Serial.println(F("Usage: name <1-30 chars>"));
+      io.println(F("Usage: name <1-30 chars>"));
     }
   } else if (cmd == "save") {
     if (settings_save()) {
-      Serial.println(F("Settings successfully saved to flash (/settings.dat)."));
+      io.println(F("Settings successfully saved to flash (/settings.dat)."));
     } else {
-      Serial.println(F("ERROR: Failed to write settings to flash!"));
+      io.println(F("ERROR: Failed to write settings to flash!"));
     }
+  } else if (cmd == "disconnect") {
+    io.println(F("[BLE] Disconnecting from host..."));
+    if (Bluefruit.connected()) {
+      delay(50);
+      Bluefruit.disconnect(Bluefruit.connHandle());
+    }
+  } else if (cmd == "pair") {
+    io.println(F("[BLE] Disconnecting and starting fresh pairing mode (60s)..."));
+    if (Bluefruit.connected()) {
+      delay(50);
+      Bluefruit.disconnect(Bluefruit.connHandle());
+    }
+    uint8_t count = NRF_POWER->GPREGRET + 1;
+    NRF_POWER->GPREGRET = count;
+    updateBleAddress();
+    Bluefruit.Advertising.start(60);
   } else if (cmd == "edge" || cmd == "park") {
     parkMouseEdge();
-    Serial.println(F("Cursor moved to right edge."));
+    io.println(F("Cursor moved to right edge."));
   } else if (cmd == "center") {
     parkMouseCenter();
-    Serial.println(F("Cursor moved to center."));
+    io.println(F("Cursor moved to center."));
   } else if (cmd == "dfu" || cmd == "bootloader") {
-    Serial.println(F("Rebooting into UF2 bootloader drive..."));
+    io.println(F("Rebooting into UF2 bootloader drive..."));
     delay(100);
     enterUf2Dfu();
   } else if (cmd == "stream") {
     g_telemetryStream = !g_telemetryStream;
-    Serial.print(F("Live telemetry stream: "));
-    Serial.println(g_telemetryStream ? F("ON") : F("OFF"));
+    io.print(F("Live telemetry stream: "));
+    io.println(g_telemetryStream ? F("ON") : F("OFF"));
   } else if (cmd == "unpair" || cmd == "clearbonds") {
     Bluefruit.Periph.clearBonds();
-    Serial.println(F("[BLE] All pairing bonds cleared. Re-advertising for fresh pairing."));
+    io.println(F("[BLE] All pairing bonds cleared. Re-advertising for fresh pairing."));
     Bluefruit.Advertising.start(0);
   } else if (cmd == "defaults") {
     settings_reset_defaults();
     settings_save();
-    Serial.println(F("Reset to factory defaults and saved to flash."));
-    printStatus();
+    io.println(F("Reset to factory defaults and saved to flash."));
+    printStatus(io);
   } else if (cmd == "reboot") {
-    Serial.println(F("Rebooting..."));
+    io.println(F("Rebooting..."));
     delay(100);
     NVIC_SystemReset();
   } else {
-    Serial.print(F("Unknown command '"));
-    Serial.print(cmd);
-    Serial.println(F("'. Type 'help' for commands."));
+    io.print(F("Unknown command '"));
+    io.print(cmd);
+    io.println(F("'. Type 'help' for commands."));
   }
 }

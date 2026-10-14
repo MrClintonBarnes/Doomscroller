@@ -8,7 +8,11 @@ upstream-doomscroller/
 # Arduino build artifacts
 *.o
 *.d
+*.cache
 doomscroller/build/*/*.elf
 doomscroller/build/*/*.hex
 doomscroller/build/*/*.map
 doomscroller/build/*/*.zip
+doomscroller/build/*/*.json
+doomscroller/build/*/core/
+doomscroller/build/*/sketch/

@@ -12,6 +12,8 @@
       --accent: #3b82f6;
       --accent-glow: rgba(59, 130, 246, 0.35);
       --accent-hover: #2563eb;
+      --ble-color: #6366f1;
+      --ble-glow: rgba(99, 102, 241, 0.35);
       --text-main: #f1f5f9;
       --text-muted: #94a3b8;
       --success: #10b981;
@@ -42,7 +44,7 @@
 
     .container {
       width: 100%;
-      max-width: 900px;
+      max-width: 920px;
     }
 
     header {
@@ -52,6 +54,8 @@
       margin-bottom: 2rem;
       padding-bottom: 1.5rem;
       border-bottom: 1px solid var(--card-border);
+      flex-wrap: wrap;
+      gap: 1rem;
     }
 
     .logo-group {
@@ -87,7 +91,8 @@
     .header-actions {
       display: flex;
       align-items: center;
-      gap: 1rem;
+      gap: 0.75rem;
+      flex-wrap: wrap;
     }
 
     .badge {
@@ -118,20 +123,30 @@
       background: var(--accent);
       color: #fff;
       border: none;
-      padding: 0.6rem 1.25rem;
+      padding: 0.6rem 1.1rem;
       border-radius: 8px;
-      font-size: 0.9rem;
+      font-size: 0.88rem;
       font-weight: 600;
       cursor: pointer;
       transition: all 0.2s ease;
       display: inline-flex;
       align-items: center;
-      gap: 0.5rem;
+      gap: 0.45rem;
     }
 
     button:hover {
       background: var(--accent-hover);
       box-shadow: 0 4px 12px var(--accent-glow);
+    }
+
+    button.btn-ble {
+      background: linear-gradient(135deg, #0ea5e9, #6366f1);
+      box-shadow: 0 4px 12px var(--ble-glow);
+    }
+
+    button.btn-ble:hover {
+      background: linear-gradient(135deg, #0284c7, #4f46e5);
+      box-shadow: 0 4px 15px rgba(99, 102, 241, 0.45);
     }
 
     button.btn-secondary {
@@ -157,7 +172,7 @@
     }
 
     button:disabled {
-      opacity: 0.5;
+      opacity: 0.45;
       cursor: not-allowed;
       box-shadow: none;
     }
@@ -308,6 +323,8 @@
       display: inline-block;
       width: 44px;
       height: 24px;
+      flex-shrink: 0;
+      margin-left: 1rem;
     }
 
     .switch input {
@@ -446,7 +463,7 @@
         <div class="logo-icon">🌀</div>
         <div class="logo-text">
           <h1>Doomscroller Configurator</h1>
-          <p>Universal Firmware v2.1 &bull; Web Serial Interface</p>
+          <p>Universal Firmware v2.2 &bull; Web Serial &amp; Web Bluetooth</p>
         </div>
       </div>
       <div class="header-actions">
@@ -454,7 +471,8 @@
           <div class="badge-dot"></div>
           <span id="statusText">Disconnected</span>
         </div>
-        <button id="connectBtn">Connect Controller</button>
+        <button id="connectUsbBtn">🔌 Connect via USB</button>
+        <button id="connectBleBtn" class="btn-ble">⚡ Connect via Bluetooth</button>
       </div>
     </header>
 
@@ -467,7 +485,7 @@
         </div>
 
         <div class="profile-tabs">
-          <div class="profile-tab active" data-profile="0">Profile 1 (Balanced)</div>
+          <div class="profile-tab active" data-profile="0">Profile 1 (Phone)</div>
           <div class="profile-tab" data-profile="1">Profile 2 (Precision)</div>
           <div class="profile-tab" data-profile="2">Profile 3 (FastFlick)</div>
         </div>
@@ -518,12 +536,28 @@
             <span class="slider-toggle"></span>
           </label>
         </div>
+
+        <!-- Auto-Park Cursor (Issue #3) -->
+        <div class="switch-group">
+          <div>
+            <div class="control-label">Auto-Park Cursor (Mobile Hide)</div>
+            <div class="control-desc">Smoothly glides cursor to right edge on connect to hide pointer on phones/tablets. Disable for PC/Mac.</div>
+          </div>
+          <label class="switch">
+            <input type="checkbox" id="cursorParkToggle" disabled>
+            <span class="slider-toggle"></span>
+          </label>
+        </div>
       </div>
 
       <!-- Device Info & Actions Sidebar -->
       <div class="card">
         <div class="card-title">Device Info</div>
 
+        <div class="info-item">
+          <span class="info-label">Link Type</span>
+          <span class="info-val" id="linkTypeVal">None</span>
+        </div>
         <div class="info-item">
           <span class="info-label">Battery Level</span>
           <span class="info-val" id="batteryVal">--</span>
@@ -545,17 +579,19 @@
         <div class="actions-list">
           <button id="edgeBtn" class="btn-secondary" disabled>Slide Cursor to Right Edge</button>
           <button id="centerBtn" class="btn-secondary" disabled>Slide Cursor to Center</button>
+          <button id="pairBtn" class="btn-secondary" disabled>Force 60s Fresh Pairing Window</button>
+          <button id="disconnectHostBtn" class="btn-secondary" disabled>Disconnect Bluetooth Host</button>
+          <button id="saveBtn" class="btn-secondary" disabled>Save Settings to Flash</button>
           <button id="dfuBtn" class="btn-secondary" disabled>Reboot to Bootloader (UF2)</button>
-          <button id="saveBtn" class="btn-secondary" disabled>Save to Flash</button>
           <button id="unpairBtn" class="btn-danger" disabled>Clear Bonds & Re-Pair</button>
         </div>
       </div>
     </div>
 
-    <!-- Live Serial Console Drawer -->
+    <!-- Live Console Drawer -->
     <div class="console-drawer">
       <div class="console-header">
-        <span>Serial Terminal (115200 Baud)</span>
+        <span id="consoleLabel">Terminal (Web Serial &amp; Web Bluetooth NUS)</span>
         <button id="clearConsoleBtn" style="padding: 0.2rem 0.6rem; font-size: 0.75rem;" class="btn-secondary">Clear</button>
       </div>
       <div class="console-body" id="consoleBody"></div>
@@ -565,18 +601,40 @@
   <div class="toast" id="toast"></div>
 
   <script>
-    // State
+    // UUIDs for Nordic UART Service (NUS)
+    const NUS_SERVICE_UUID = '6e400001-b5a3-f393-e0a9-e50e24dcca9e';
+    const NUS_RX_CHAR_UUID = '6e400002-b5a3-f393-e0a9-e50e24dcca9e'; // Web -> Device (Write)
+    const NUS_TX_CHAR_UUID = '6e400003-b5a3-f393-e0a9-e50e24dcca9e'; // Device -> Web (Notify)
+
+    // Connection State
+    let activeConnectionType = 'none'; // 'none' | 'serial' | 'ble'
+    
+    // Serial state
     let port = null;
     let reader = null;
-    let writer = null;
     let keepReading = false;
+
+    // Web Bluetooth state
+    let bleDevice = null;
+    let bleServer = null;
+    let bleRxChar = null;
+    let bleTxChar = null;
+    let bleBuffer = '';
+
+    // Settings State
     let currentSettings = null;
     let activeProfileIndex = 0;
 
-    // Elements
-    const connectBtn = document.getElementById('connectBtn');
+    // Browser support flags
+    const hasSerial = 'serial' in navigator;
+    const hasBluetooth = 'bluetooth' in navigator;
+
+    // DOM Elements
+    const connectUsbBtn = document.getElementById('connectUsbBtn');
+    const connectBleBtn = document.getElementById('connectBleBtn');
     const statusBadge = document.getElementById('statusBadge');
     const statusText = document.getElementById('statusText');
+    const linkTypeVal = document.getElementById('linkTypeVal');
     const consoleBody = document.getElementById('consoleBody');
     const toast = document.getElementById('toast');
 
@@ -591,6 +649,7 @@
     const deadzoneSlider = document.getElementById('deadzoneSlider');
     const deadzoneVal = document.getElementById('deadzoneVal');
     const invertToggle = document.getElementById('invertToggle');
+    const cursorParkToggle = document.getElementById('cursorParkToggle');
 
     const batteryVal = document.getElementById('batteryVal');
     const bleStatus = document.getElementById('bleStatus');
@@ -599,15 +658,30 @@
 
     const edgeBtn = document.getElementById('edgeBtn');
     const centerBtn = document.getElementById('centerBtn');
+    const pairBtn = document.getElementById('pairBtn');
+    const disconnectHostBtn = document.getElementById('disconnectHostBtn');
     const dfuBtn = document.getElementById('dfuBtn');
     const saveBtn = document.getElementById('saveBtn');
     const unpairBtn = document.getElementById('unpairBtn');
     const clearConsoleBtn = document.getElementById('clearConsoleBtn');
 
+    // Initial check for browser compatibility
+    if (!hasSerial && !hasBluetooth) {
+      appendConsole('Warning: Neither Web Serial nor Web Bluetooth is supported in this browser. Please use Chrome, Edge, or Opera on desktop or Android.', 'err');
+    }
+    if (!hasSerial) {
+      connectUsbBtn.disabled = true;
+      connectUsbBtn.title = 'Web Serial API is not supported in this browser.';
+    }
+    if (!hasBluetooth) {
+      connectBleBtn.disabled = true;
+      connectBleBtn.title = 'Web Bluetooth API is not supported in this browser.';
+    }
+
     function showToast(msg) {
       toast.innerText = msg;
       toast.style.display = 'block';
-      setTimeout(() => { toast.style.display = 'none'; }, 2500);
+      setTimeout(() => { toast.style.display = 'none'; }, 2600);
     }
 
     function appendConsole(text, type = '') {
@@ -622,73 +696,129 @@
       consoleBody.innerHTML = '';
     });
 
-    // Check Web Serial support
-    if (!('serial' in navigator)) {
-      alert('Web Serial API is not supported in this browser. Please use Chrome, Edge, or Opera on desktop.');
-      connectBtn.disabled = true;
-      connectBtn.innerText = 'Web Serial Unsupported';
+    // =========================================================================
+    // Connection UI Updates & Issue #1 Disconnect Fix
+    // =========================================================================
+    function updateConnectionUI(connected, type = 'none') {
+      activeConnectionType = connected ? type : 'none';
+
+      if (connected) {
+        statusBadge.classList.add('connected');
+        if (type === 'serial') {
+          statusText.innerText = 'Connected (USB)';
+          linkTypeVal.innerText = 'USB Serial';
+          connectUsbBtn.innerText = 'Disconnect (USB)';
+          connectUsbBtn.classList.add('btn-secondary');
+          connectUsbBtn.disabled = false;
+          connectBleBtn.disabled = true;
+        } else if (type === 'ble') {
+          statusText.innerText = 'Connected (BLE)';
+          linkTypeVal.innerText = 'Web Bluetooth';
+          connectBleBtn.innerText = 'Disconnect (BLE)';
+          connectBleBtn.classList.add('btn-secondary');
+          connectBleBtn.classList.remove('btn-ble');
+          connectBleBtn.disabled = false;
+          connectUsbBtn.disabled = true;
+        }
+        setControlsEnabled(true);
+      } else {
+        statusBadge.classList.remove('connected');
+        statusText.innerText = 'Disconnected';
+        linkTypeVal.innerText = 'None';
+
+        connectUsbBtn.innerText = '🔌 Connect via USB';
+        connectUsbBtn.classList.remove('btn-secondary');
+        connectUsbBtn.disabled = !hasSerial;
+
+        connectBleBtn.innerText = '⚡ Connect via Bluetooth';
+        connectBleBtn.classList.remove('btn-secondary');
+        connectBleBtn.classList.add('btn-ble');
+        connectBleBtn.disabled = !hasBluetooth;
+
+        setControlsEnabled(false);
+      }
     }
 
-    // Connect / Disconnect
-    connectBtn.addEventListener('click', async () => {
-      if (port) {
-        await disconnect();
+    function handlePhysicalDisconnect(reason) {
+      if (activeConnectionType === 'none') return;
+      appendConsole('Disconnected: ' + reason, 'err');
+      showToast('Device disconnected: ' + reason);
+
+      keepReading = false;
+      port = null;
+      reader = null;
+
+      bleDevice = null;
+      bleServer = null;
+      bleRxChar = null;
+      bleTxChar = null;
+      bleBuffer = '';
+
+      updateConnectionUI(false);
+    }
+
+    // =========================================================================
+    // Web Serial (USB)
+    // =========================================================================
+    if (hasSerial) {
+      navigator.serial.addEventListener('disconnect', (event) => {
+        if (port && event.target === port) {
+          handlePhysicalDisconnect('USB cable unplugged');
+        }
+      });
+    }
+
+    connectUsbBtn.addEventListener('click', async () => {
+      if (activeConnectionType === 'serial') {
+        await disconnectUsb();
       } else {
-        await connect();
+        await connectUsb();
       }
     });
 
-    async function connect() {
+    async function connectUsb() {
       try {
         port = await navigator.serial.requestPort();
         await port.open({ baudRate: 115200 });
 
-        statusBadge.classList.add('connected');
-        statusText.innerText = 'Connected';
-        connectBtn.innerText = 'Disconnect';
-        connectBtn.classList.add('btn-secondary');
+        updateConnectionUI(true, 'serial');
+        appendConsole('Connected to Doomscroller at 115200 baud via USB', 'out');
+        showToast('Connected via USB Serial');
 
-        setControlsEnabled(true);
-        appendConsole('Connected to Doomscroller at 115200 baud', 'out');
+        startReadingSerial();
 
-        startReading();
-
-        // Request JSON state
-        setTimeout(() => sendCommand('json'), 300);
+        // Request initial state from controller
+        setTimeout(() => sendCommand('json'), 350);
       } catch (err) {
         console.error('Serial connection error:', err);
-        appendConsole('Connection failed: ' + err.message, 'err');
+        appendConsole('USB connection failed: ' + err.message, 'err');
+        handlePhysicalDisconnect('Connection failed');
       }
     }
 
-    async function disconnect() {
+    async function disconnectUsb() {
       keepReading = false;
-      if (reader) {
-        await reader.cancel();
-      }
-      if (writer) {
-        await writer.close();
-      }
-      if (port) {
-        await port.close();
-      }
+      try {
+        if (reader) {
+          await reader.cancel().catch(() => {});
+        }
+      } catch (e) {}
+      try {
+        if (port) {
+          await port.close().catch(() => {});
+        }
+      } catch (e) {}
       port = null;
       reader = null;
-      writer = null;
-
-      statusBadge.classList.remove('connected');
-      statusText.innerText = 'Disconnected';
-      connectBtn.innerText = 'Connect Controller';
-      connectBtn.classList.remove('btn-secondary');
-
-      setControlsEnabled(false);
-      appendConsole('Disconnected from controller', 'in');
+      updateConnectionUI(false);
+      appendConsole('Disconnected from USB serial port', 'in');
+      showToast('Disconnected from USB');
     }
 
-    async function startReading() {
+    async function startReadingSerial() {
       keepReading = true;
       const textDecoder = new TextDecoderStream();
-      const readableStreamClosed = port.readable.pipeTo(textDecoder.writable);
+      port.readable.pipeTo(textDecoder.writable).catch(() => {});
       reader = textDecoder.readable.getReader();
 
       let lineBuffer = '';
@@ -696,11 +826,16 @@
       try {
         while (keepReading) {
           const { value, done } = await reader.read();
-          if (done) break;
+          if (done) {
+            if (keepReading) {
+              handlePhysicalDisconnect('USB stream closed');
+            }
+            break;
+          }
           if (value) {
             lineBuffer += value;
             let lines = lineBuffer.split('\n');
-            lineBuffer = lines.pop(); // keep unfinished fragment
+            lineBuffer = lines.pop(); // keep unfinished chunk
 
             for (let line of lines) {
               line = line.trim();
@@ -711,21 +846,132 @@
           }
         }
       } catch (err) {
-        console.warn('Read error:', err);
+        console.warn('Serial read error:', err);
+        if (keepReading) {
+          handlePhysicalDisconnect('USB connection lost');
+        }
       } finally {
-        reader.releaseLock();
+        try {
+          reader.releaseLock();
+        } catch (e) {}
       }
     }
 
-    async function sendCommand(cmd) {
-      if (!port || !port.writable) return;
-      appendConsole('> ' + cmd, 'out');
-      const textEncoder = new TextEncoder();
-      const writer = port.writable.getWriter();
-      await writer.write(textEncoder.encode(cmd + '\n'));
-      writer.releaseLock();
+    // =========================================================================
+    // Web Bluetooth (BLE)
+    // =========================================================================
+    connectBleBtn.addEventListener('click', async () => {
+      if (activeConnectionType === 'ble') {
+        await disconnectBle();
+      } else {
+        await connectBle();
+      }
+    });
+
+    async function connectBle() {
+      try {
+        appendConsole('Requesting Bluetooth device (Nordic UART Service)...', 'out');
+        bleDevice = await navigator.bluetooth.requestDevice({
+          filters: [
+            { services: [NUS_SERVICE_UUID] },
+            { namePrefix: 'Doomscroller' }
+          ],
+          optionalServices: [NUS_SERVICE_UUID]
+        });
+
+        bleDevice.addEventListener('gattserverdisconnected', () => {
+          handlePhysicalDisconnect('Bluetooth connection lost');
+        });
+
+        appendConsole(`Connecting to GATT server on ${bleDevice.name || 'device'}...`, 'out');
+        bleServer = await bleDevice.gatt.connect();
+
+        appendConsole('Discovering Nordic UART Service...', 'out');
+        const nusService = await bleServer.getPrimaryService(NUS_SERVICE_UUID);
+
+        appendConsole('Setting up RX and TX characteristics...', 'out');
+        bleRxChar = await nusService.getCharacteristic(NUS_RX_CHAR_UUID);
+        bleTxChar = await nusService.getCharacteristic(NUS_TX_CHAR_UUID);
+
+        await bleTxChar.startNotifications();
+        bleTxChar.addEventListener('characteristicvaluechanged', onBleNotification);
+
+        updateConnectionUI(true, 'ble');
+        appendConsole(`Connected to ${bleDevice.name || 'Doomscroller'} wirelessly via Web Bluetooth!`, 'out');
+        showToast('Connected via Bluetooth');
+
+        setTimeout(() => sendCommand('json'), 350);
+      } catch (err) {
+        console.error('BLE connection error:', err);
+        appendConsole('Bluetooth connection error: ' + err.message, 'err');
+        handlePhysicalDisconnect('BLE pairing failed');
+      }
     }
 
+    async function disconnectBle() {
+      try {
+        if (bleTxChar) {
+          await bleTxChar.stopNotifications().catch(() => {});
+        }
+        if (bleDevice && bleDevice.gatt.connected) {
+          bleDevice.gatt.disconnect();
+        }
+      } catch (e) {}
+      bleDevice = null;
+      bleServer = null;
+      bleRxChar = null;
+      bleTxChar = null;
+      bleBuffer = '';
+      updateConnectionUI(false);
+      appendConsole('Disconnected from Bluetooth controller', 'in');
+      showToast('Disconnected from Bluetooth');
+    }
+
+    // Reassembles incoming BLE notifications until '\n' before parsing
+    function onBleNotification(event) {
+      const dataView = event.target.value;
+      const decoder = new TextDecoder();
+      const chunk = decoder.decode(dataView);
+      bleBuffer += chunk;
+
+      let lines = bleBuffer.split('\n');
+      bleBuffer = lines.pop(); // Retain incomplete tail
+
+      for (let line of lines) {
+        line = line.trim();
+        if (line.length === 0) continue;
+        appendConsole(line, 'in');
+        handleIncomingLine(line);
+      }
+    }
+
+    // =========================================================================
+    // Unified Command Sender
+    // =========================================================================
+    async function sendCommand(cmd) {
+      if (activeConnectionType === 'serial') {
+        if (!port || !port.writable) return;
+        appendConsole('> ' + cmd, 'out');
+        const textEncoder = new TextEncoder();
+        const writer = port.writable.getWriter();
+        await writer.write(textEncoder.encode(cmd + '\n'));
+        writer.releaseLock();
+      } else if (activeConnectionType === 'ble') {
+        if (!bleRxChar) return;
+        appendConsole('> ' + cmd, 'out');
+        const textEncoder = new TextEncoder();
+        const data = textEncoder.encode(cmd + '\n');
+        if (bleRxChar.writeValueWithoutResponse) {
+          await bleRxChar.writeValueWithoutResponse(data);
+        } else {
+          await bleRxChar.writeValue(data);
+        }
+      }
+    }
+
+    // =========================================================================
+    // Parser & UI Update
+    // =========================================================================
     function handleIncomingLine(line) {
       // Check for JSON payload
       if (line.startsWith('{') && line.endsWith('}')) {
@@ -755,10 +1001,14 @@
 
     function updateUIWithJSON(data) {
       currentSettings = data;
-      firmwareVal.innerText = data.fw || 'v2.1-Universal';
+      firmwareVal.innerText = data.fw || 'v2.2-Universal';
       bleStatus.innerText = data.connected ? 'Connected' : 'Advertising';
-      batteryVal.innerText = `${data.batteryV.toFixed(2)}V (${data.batteryPct}%)`;
-      rawAngleVal.innerText = data.rawAngle;
+      if (typeof data.batteryV === 'number' && typeof data.batteryPct === 'number') {
+        batteryVal.innerText = `${data.batteryV.toFixed(2)}V (${data.batteryPct}%)`;
+      }
+      if (data.rawAngle !== undefined) {
+        rawAngleVal.innerText = data.rawAngle;
+      }
 
       activeProfileIndex = data.activeProfile;
 
@@ -786,6 +1036,7 @@
       deadzoneVal.innerText = Number(prof.deadzone).toFixed(2) + '°';
 
       invertToggle.checked = Boolean(prof.invert);
+      cursorParkToggle.checked = Boolean(prof.cursorPark);
     }
 
     function setControlsEnabled(enabled) {
@@ -795,18 +1046,24 @@
       accelSlider.disabled = !enabled;
       deadzoneSlider.disabled = !enabled;
       invertToggle.disabled = !enabled;
+      cursorParkToggle.disabled = !enabled;
 
       edgeBtn.disabled = !enabled;
       centerBtn.disabled = !enabled;
+      pairBtn.disabled = !enabled;
+      disconnectHostBtn.disabled = !enabled;
       dfuBtn.disabled = !enabled;
       saveBtn.disabled = !enabled;
       unpairBtn.disabled = !enabled;
     }
 
+    // =========================================================================
+    // Control Handlers
+    // =========================================================================
     // Profile Switching
     profileTabs.forEach(tab => {
       tab.addEventListener('click', async () => {
-        if (!port) return;
+        if (activeConnectionType === 'none') return;
         const targetIdx = parseInt(tab.dataset.profile);
         profileTabs.forEach((t, i) => t.classList.toggle('active', i === targetIdx));
         activeProfileIndex = targetIdx;
@@ -855,9 +1112,22 @@
       showToast('Scroll direction inverted');
     });
 
-    // Actions
+    cursorParkToggle.addEventListener('change', async () => {
+      await sendCommand(`cursorpark ${cursorParkToggle.checked ? 'on' : 'off'}`);
+      showToast(`Auto-park cursor ${cursorParkToggle.checked ? 'enabled' : 'disabled'}`);
+    });
+
+    // Quick Tool Actions
     edgeBtn.addEventListener('click', () => sendCommand('edge'));
     centerBtn.addEventListener('click', () => sendCommand('center'));
+    pairBtn.addEventListener('click', () => {
+      sendCommand('pair');
+      showToast('Fresh 60s pairing window opened');
+    });
+    disconnectHostBtn.addEventListener('click', () => {
+      sendCommand('disconnect');
+      showToast('Disconnect command sent to controller');
+    });
     dfuBtn.addEventListener('click', () => {
       if (confirm('Reboot controller into UF2 bootloader drive?')) {
         sendCommand('dfu');

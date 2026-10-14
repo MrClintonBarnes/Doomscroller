@@ -18,19 +18,21 @@ void settings_reset_defaults() {
   strncpy(g_settings.deviceName, DEFAULT_DEVICE_NAME, sizeof(g_settings.deviceName) - 1);
   g_settings.deviceName[sizeof(g_settings.deviceName) - 1] = '\0';
 
-  // Profile 0: Balanced / Normal (Default)
+  // Profile 0: Balanced / Phone (Default)
   strncpy(g_settings.profiles[0].name, "Balanced", sizeof(g_settings.profiles[0].name) - 1);
   g_settings.profiles[0].degreesPerStep = DEFAULT_DEGREES_PER_STEP; // 30.0°
   g_settings.profiles[0].accelFactor    = DEFAULT_ACCEL_FACTOR;      // 0.020
   g_settings.profiles[0].deadzoneDeg    = DEFAULT_DEADZONE_DEG;      // 0.18°
   g_settings.profiles[0].invertScroll   = DEFAULT_INVERT_SCROLL;    // false
+  g_settings.profiles[0].cursorPark     = true;                     // Slide cursor to right edge on phone
 
-  // Profile 1: Precision / Reading
+  // Profile 1: Precision / PC
   strncpy(g_settings.profiles[1].name, "Precision", sizeof(g_settings.profiles[1].name) - 1);
   g_settings.profiles[1].degreesPerStep = 45.0f;                     // Slower, finer control
   g_settings.profiles[1].accelFactor    = 0.005f;                    // Low acceleration
   g_settings.profiles[1].deadzoneDeg    = 0.18f;
   g_settings.profiles[1].invertScroll   = false;
+  g_settings.profiles[1].cursorPark     = false;                    // Keep cursor in place on PC
 
   // Profile 2: Fast / Social Media Flick
   strncpy(g_settings.profiles[2].name, "FastFlick", sizeof(g_settings.profiles[2].name) - 1);
@@ -38,6 +40,7 @@ void settings_reset_defaults() {
   g_settings.profiles[2].accelFactor    = 0.040f;                    // Strong flick multiplier
   g_settings.profiles[2].deadzoneDeg    = 0.15f;
   g_settings.profiles[2].invertScroll   = false;
+  g_settings.profiles[2].cursorPark     = true;
 }
 
 void settings_init() {

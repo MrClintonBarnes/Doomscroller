@@ -12,7 +12,6 @@
 #define PIN_LED_BLUE        12    // P0.06 - Blue LED (used for pairing indicator)
 #define PIN_LED_GREEN       13    // P0.30 - Green LED
 
-
 // ============================================================================
 // SPI & MagAlpha Encoder Parameters
 // ============================================================================
@@ -29,13 +28,14 @@
 #define DEFAULT_DEGREES_PER_STEP    30.0f     // Degrees of rotation per 1 mouse wheel notch (~12 notches/rev)
 #define DEFAULT_ACCEL_FACTOR        0.02f     // Dynamic acceleration multiplier for fast flicks (0.0 = linear)
 #define DEFAULT_DEADZONE_DEG        0.18f     // Deadzone threshold in degrees per sample to ignore resting noise
-#define DEFAULT_INVERT_SCROLL       false     // Set true to flip scroll direction (or use "invert" via Serial CLI)
-#define DEFAULT_IDLE_TIMEOUT_SEC    30        // Seconds without motion before entering low-power idle
+#define DEFAULT_INVERT_SCROLL       false     // Set true to flip scroll direction (or use "invert" via Serial/BLE)
+#define DEFAULT_CURSOR_PARK         true      // Default to auto-parking cursor on right edge (ideal for phones)
+#define DEFAULT_IDLE_TIMEOUT_SEC    15        // Seconds without motion before entering ultra-low power idle
 #define IDLE_POLL_INTERVAL_MS       100       // How often to check for motion when idle (sub-100ms wake latency)
 #define ACTIVE_LOOP_INTERVAL_MS     10        // Active sampling period: 10ms (100Hz), matched to BLE interval
 
 // Version
-#define FIRMWARE_VERSION            "v2.1-Universal"
+#define FIRMWARE_VERSION            "v2.2-Universal"
 
 // ============================================================================
 // Multi-Profile Persistent Settings (InternalFS Flash Storage)
@@ -43,11 +43,12 @@
 #define NUM_PROFILES 3
 
 struct TuningProfile {
-  char  name[16];                     // Friendly profile name (e.g. "Normal", "Precision", "FastFlick")
+  char  name[16];                     // Friendly profile name (e.g. "Balanced", "Precision", "FastFlick")
   float degreesPerStep;               // Degrees of rotation per mouse wheel notch
   float accelFactor;                  // Dynamic acceleration multiplier
   float deadzoneDeg;                  // Motion deadzone in degrees
   bool  invertScroll;                 // True = invert scroll direction
+  bool  cursorPark;                   // True = slide cursor to right edge on connect (Phone), False = keep in place (PC)
 };
 
 struct DeviceSettings {
@@ -59,4 +60,4 @@ struct DeviceSettings {
 };
 
 #define SETTINGS_MAGIC    0x444F4F4D  // "DOOM"
-#define SETTINGS_VERSION  2
+#define SETTINGS_VERSION  3           // Version 3 includes cursorPark
