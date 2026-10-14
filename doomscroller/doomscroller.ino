@@ -80,6 +80,7 @@ static uint32_t g_connectTime        = 0;
 // Forward Declarations
 void printHelp();
 void printStatus();
+void printJsonStatus();
 void handleSerialCLI();
 void sendMouseScroll(int8_t scrollSteps);
 void parkMouseEdge();
@@ -267,13 +268,14 @@ void loop() {
     return;
   }
 
+  TuningProfile& prof = getActiveProfile();
   float absVel = fabsf(velocity);
-  if (absVel > g_settings.deadzoneDeg) {
-    float dir = g_settings.invertScroll ? -1.0f : 1.0f;
-    float baseSteps = (deltaDeg / g_settings.degreesPerStep) * dir;
+  if (absVel > prof.deadzoneDeg) {
+    float dir = prof.invertScroll ? -1.0f : 1.0f;
+    float baseSteps = (deltaDeg / prof.degreesPerStep) * dir;
 
     // Dynamic flick acceleration curve
-    float accelMultiplier = 1.0f + (absVel * g_settings.accelFactor * 0.01f);
+    float accelMultiplier = 1.0f + (absVel * prof.accelFactor * 0.01f);
     if (accelMultiplier > 8.0f) {
       accelMultiplier = 8.0f;
     }
@@ -392,18 +394,23 @@ uint8_t readBatteryPercentage() {
 void printHelp() {
   Serial.println();
   Serial.println(F("--- Doomscroller Serial Commands ---"));
-  Serial.println(F("  status         - Show current status and settings"));
-  Serial.println(F("  battery        - Read battery voltage and estimated percentage"));
-  Serial.println(F("  invert         - Toggle scroll direction (invert)"));
-  Serial.println(F("  speed <deg>    - Set degrees per wheel click (e.g. 'speed 30.0')"));
-  Serial.println(F("  accel <gain>   - Set flick acceleration (e.g. 'accel 0.02', 0=off)"));
-  Serial.println(F("  deadzone <deg> - Set deadzone degrees (e.g. 'deadzone 0.18')"));
-  Serial.println(F("  name <str>     - Set Bluetooth device name (e.g. 'name Doomscroller')"));
-  Serial.println(F("  edge           - Slide mouse cursor to right margin (out of video center)"));
+  Serial.println(F("  status         - Show current status and all profile settings"));
+  Serial.println(F("  profile <1-3>  - Switch active tuning profile (e.g. 'profile 1')"));
+  Serial.println(F("  pname <str>    - Rename active profile (e.g. 'pname Social')"));
+  Serial.println(F("  speed <deg>    - Set degrees per click for active profile"));
+  Serial.println(F("  accel <gain>   - Set flick acceleration for active profile"));
+  Serial.println(F("  deadzone <deg> - Set deadzone degrees for active profile"));
+  Serial.println(F("  invert         - Toggle scroll direction for active profile"));
+  Serial.println(F("  name <str>     - Set Bluetooth device name"));
+  Serial.println(F("  save           - Explicitly save settings to flash"));
+  Serial.println(F("  edge           - Slide mouse cursor to right margin"));
   Serial.println(F("  center         - Move mouse cursor back towards center"));
+  Serial.println(F("  battery        - Read battery voltage and estimated percentage"));
+  Serial.println(F("  json           - Output machine-readable JSON status"));
   Serial.println(F("  dfu            - Reboot into UF2 bootloader drive for flashing"));
+  Serial.println(F("  stream         - Toggle live angle & velocity telemetry"));
   Serial.println(F("  unpair         - Clear all BLE bonding keys and re-advertise"));
-  Serial.println(F("  defaults       - Reset settings to factory defaults"));
+  Serial.println(F("  defaults       - Reset all settings to factory defaults"));
   Serial.println(F("  reboot         - Reboot controller"));
   Serial.println(F("  help           - Print this menu"));
   Serial.println();
@@ -423,12 +430,76 @@ void printStatus() {
   Serial.print(readBatteryPercentage());
   Serial.println(F("%)"));
   Serial.print(F("Raw Angle:        ")); Serial.println(g_sensor.getRawAngle());
-  Serial.print(F("Scroll Direction: ")); Serial.println(g_settings.invertScroll ? F("INVERTED") : F("NORMAL"));
-  Serial.print(F("Degrees/Step:     ")); Serial.println(g_settings.degreesPerStep, 2);
-  Serial.print(F("Accel Factor:     ")); Serial.println(g_settings.accelFactor, 3);
-  Serial.print(F("Deadzone:         ")); Serial.print(g_settings.deadzoneDeg, 2); Serial.println(F("°"));
+  Serial.print(F("Active Profile:   "));
+  Serial.print(g_settings.activeProfile + 1);
+  Serial.print(F(" / "));
+  Serial.print(NUM_PROFILES);
+  Serial.print(F(" ["));
+  Serial.print(getActiveProfile().name);
+  Serial.println(F("]"));
+
+  Serial.println(F("--- Active Profile Tuning ---"));
+  TuningProfile& cur = getActiveProfile();
+  Serial.print(F("  Degrees/Step:   ")); Serial.println(cur.degreesPerStep, 2);
+  Serial.print(F("  Accel Factor:   ")); Serial.println(cur.accelFactor, 3);
+  Serial.print(F("  Deadzone:       ")); Serial.print(cur.deadzoneDeg, 2); Serial.println(F("°"));
+  Serial.print(F("  Scroll Invert:  ")); Serial.println(cur.invertScroll ? F("YES (Inverted)") : F("NO (Normal)"));
+
+  Serial.println(F("--- All Profiles ---"));
+  for (int i = 0; i < NUM_PROFILES; i++) {
+    Serial.print(i == g_settings.activeProfile ? F(" *[") : F("  ["));
+    Serial.print(i + 1);
+    Serial.print(F("] "));
+    Serial.print(g_settings.profiles[i].name);
+    Serial.print(F(": "));
+    Serial.print(g_settings.profiles[i].degreesPerStep, 1);
+    Serial.print(F("°/step, accel="));
+    Serial.print(g_settings.profiles[i].accelFactor, 3);
+    Serial.print(F(", deadzone="));
+    Serial.print(g_settings.profiles[i].deadzoneDeg, 2);
+    Serial.print(F("°, invert="));
+    Serial.println(g_settings.profiles[i].invertScroll ? F("YES") : F("NO"));
+  }
   Serial.print(F("Uptime:           ")); Serial.print(millis() / 1000); Serial.println(F("s"));
   Serial.println();
+}
+
+void printJsonStatus() {
+  float v = readBatteryVoltage();
+  uint8_t pct = readBatteryPercentage();
+  Serial.print(F("{\"version\":"));
+  Serial.print(g_settings.version);
+  Serial.print(F(",\"fw\":\"" FIRMWARE_VERSION "\""));
+  Serial.print(F(",\"name\":\""));
+  Serial.print(g_settings.deviceName);
+  Serial.print(F("\",\"connected\":"));
+  Serial.print(Bluefruit.connected() ? F("true") : F("false"));
+  Serial.print(F(",\"batteryV\":"));
+  Serial.print(v, 2);
+  Serial.print(F(",\"batteryPct\":"));
+  Serial.print(pct);
+  Serial.print(F(",\"rawAngle\":"));
+  Serial.print(g_sensor.getRawAngle());
+  Serial.print(F(",\"activeProfile\":"));
+  Serial.print(g_settings.activeProfile);
+  Serial.print(F(",\"profiles\":["));
+  for (int i = 0; i < NUM_PROFILES; i++) {
+    if (i > 0) Serial.print(',');
+    Serial.print(F("{\"id\":"));
+    Serial.print(i);
+    Serial.print(F(",\"name\":\""));
+    Serial.print(g_settings.profiles[i].name);
+    Serial.print(F("\",\"speed\":"));
+    Serial.print(g_settings.profiles[i].degreesPerStep, 2);
+    Serial.print(F(",\"accel\":"));
+    Serial.print(g_settings.profiles[i].accelFactor, 3);
+    Serial.print(F(",\"deadzone\":"));
+    Serial.print(g_settings.profiles[i].deadzoneDeg, 2);
+    Serial.print(F(",\"invert\":"));
+    Serial.print(g_settings.profiles[i].invertScroll ? F("true") : F("false"));
+    Serial.print(F("}"));
+  }
+  Serial.println(F("]}"));
 }
 
 void handleSerialCLI() {
@@ -445,6 +516,47 @@ void handleSerialCLI() {
     printHelp();
   } else if (cmd == "status") {
     printStatus();
+  } else if (cmd == "json") {
+    printJsonStatus();
+  } else if (cmd == "profile") {
+    arg.trim();
+    if (arg.length() > 0) {
+      int pNum = arg.toInt();
+      if (pNum >= 1 && pNum <= NUM_PROFILES) {
+        g_settings.activeProfile = (uint8_t)(pNum - 1);
+        settings_save();
+        Serial.print(F("Active profile switched to ["));
+        Serial.print(pNum);
+        Serial.print(F("] "));
+        Serial.print(getActiveProfile().name);
+        Serial.println(F(" (Saved to flash)"));
+      } else if (pNum == 0 && arg == "0") {
+        g_settings.activeProfile = 0;
+        settings_save();
+        Serial.print(F("Active profile switched to [1] "));
+        Serial.print(getActiveProfile().name);
+        Serial.println(F(" (Saved to flash)"));
+      } else {
+        Serial.println(F("Usage: profile <1 to 3> (e.g. 'profile 1')"));
+      }
+    } else {
+      Serial.print(F("Current profile: ["));
+      Serial.print(g_settings.activeProfile + 1);
+      Serial.print(F("] "));
+      Serial.println(getActiveProfile().name);
+    }
+  } else if (cmd == "pname") {
+    arg.trim();
+    if (arg.length() > 0 && arg.length() < 16) {
+      strncpy(getActiveProfile().name, arg.c_str(), sizeof(getActiveProfile().name) - 1);
+      getActiveProfile().name[sizeof(getActiveProfile().name) - 1] = '\0';
+      settings_save();
+      Serial.print(F("Active profile renamed to '"));
+      Serial.print(getActiveProfile().name);
+      Serial.println(F("' (Saved to flash)"));
+    } else {
+      Serial.println(F("Usage: pname <1-15 chars>"));
+    }
   } else if (cmd == "battery") {
     float v = readBatteryVoltage();
     uint8_t p = readBatteryPercentage();
@@ -454,34 +566,49 @@ void handleSerialCLI() {
     Serial.print(p);
     Serial.println(F("%)"));
   } else if (cmd == "invert") {
-    g_settings.invertScroll = !g_settings.invertScroll;
-    Serial.print(F("Scroll direction inverted: "));
-    Serial.println(g_settings.invertScroll ? F("YES") : F("NO"));
+    TuningProfile& prof = getActiveProfile();
+    prof.invertScroll = !prof.invertScroll;
+    settings_save();
+    Serial.print(F("Scroll direction for ["));
+    Serial.print(prof.name);
+    Serial.print(F("]: "));
+    Serial.println(prof.invertScroll ? F("INVERTED (Saved to flash)") : F("NORMAL (Saved to flash)"));
   } else if (cmd == "speed" || cmd == "scale") {
     float val = arg.toFloat();
     if (val > 0.5f && val < 100.0f) {
-      g_settings.degreesPerStep = val;
-      Serial.print(F("Degrees per step set to: "));
-      Serial.println(val, 2);
+      getActiveProfile().degreesPerStep = val;
+      settings_save();
+      Serial.print(F("Degrees per step for ["));
+      Serial.print(getActiveProfile().name);
+      Serial.print(F("] set to: "));
+      Serial.print(val, 2);
+      Serial.println(F(" (Saved to flash)"));
     } else {
       Serial.println(F("Usage: speed <0.5 to 100.0> (e.g. speed 30.0)"));
     }
   } else if (cmd == "accel") {
     float val = arg.toFloat();
     if (val >= 0.0f && val <= 1.0f) {
-      g_settings.accelFactor = val;
-      Serial.print(F("Acceleration factor set to: "));
-      Serial.println(val, 3);
+      getActiveProfile().accelFactor = val;
+      settings_save();
+      Serial.print(F("Acceleration factor for ["));
+      Serial.print(getActiveProfile().name);
+      Serial.print(F("] set to: "));
+      Serial.print(val, 3);
+      Serial.println(F(" (Saved to flash)"));
     } else {
       Serial.println(F("Usage: accel <0.0 to 1.0> (e.g. accel 0.02)"));
     }
   } else if (cmd == "deadzone") {
     float val = arg.toFloat();
     if (val >= 0.01f && val <= 5.0f) {
-      g_settings.deadzoneDeg = val;
-      Serial.print(F("Deadzone set to: "));
+      getActiveProfile().deadzoneDeg = val;
+      settings_save();
+      Serial.print(F("Deadzone for ["));
+      Serial.print(getActiveProfile().name);
+      Serial.print(F("] set to: "));
       Serial.print(val, 2);
-      Serial.println(F("°"));
+      Serial.println(F("° (Saved to flash)"));
     } else {
       Serial.println(F("Usage: deadzone <0.01 to 5.0>"));
     }
@@ -490,11 +617,18 @@ void handleSerialCLI() {
     if (arg.length() > 0 && arg.length() < 31) {
       strncpy(g_settings.deviceName, arg.c_str(), sizeof(g_settings.deviceName) - 1);
       g_settings.deviceName[sizeof(g_settings.deviceName) - 1] = '\0';
+      settings_save();
       Serial.print(F("Device name updated to '"));
       Serial.print(g_settings.deviceName);
-      Serial.println(F("'. Reboot to apply new BLE name."));
+      Serial.println(F("'. Reboot to apply new BLE name. (Saved to flash)"));
     } else {
       Serial.println(F("Usage: name <1-30 chars>"));
+    }
+  } else if (cmd == "save") {
+    if (settings_save()) {
+      Serial.println(F("Settings successfully saved to flash (/settings.dat)."));
+    } else {
+      Serial.println(F("ERROR: Failed to write settings to flash!"));
     }
   } else if (cmd == "edge" || cmd == "park") {
     parkMouseEdge();
@@ -516,7 +650,8 @@ void handleSerialCLI() {
     Bluefruit.Advertising.start(0);
   } else if (cmd == "defaults") {
     settings_reset_defaults();
-    Serial.println(F("Reset to factory defaults."));
+    settings_save();
+    Serial.println(F("Reset to factory defaults and saved to flash."));
     printStatus();
   } else if (cmd == "reboot") {
     Serial.println(F("Rebooting..."));

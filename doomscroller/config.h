@@ -35,19 +35,28 @@
 #define ACTIVE_LOOP_INTERVAL_MS     10        // Active sampling period: 10ms (100Hz), matched to BLE interval
 
 // Version
-#define FIRMWARE_VERSION            "v2.0-Universal"
+#define FIRMWARE_VERSION            "v2.1-Universal"
 
 // ============================================================================
-// Persistent Settings Structure (saved in internal flash)
+// Multi-Profile Persistent Settings (InternalFS Flash Storage)
 // ============================================================================
-struct DeviceSettings {
-  uint32_t magic;                     // Magic bytes to validate storage (0x444F4F4D = "DOOM")
-  char     deviceName[32];            // Bluetooth advertised name
-  float    degreesPerStep;            // Sensitivity (degrees per mouse wheel click)
-  float    accelFactor;               // Flick acceleration factor
-  float    deadzoneDeg;               // Motion deadzone in degrees
-  bool     invertScroll;              // True = invert wheel direction
-  uint16_t idleTimeoutSec;            // Idle timeout in seconds
+#define NUM_PROFILES 3
+
+struct TuningProfile {
+  char  name[16];                     // Friendly profile name (e.g. "Normal", "Precision", "FastFlick")
+  float degreesPerStep;               // Degrees of rotation per mouse wheel notch
+  float accelFactor;                  // Dynamic acceleration multiplier
+  float deadzoneDeg;                  // Motion deadzone in degrees
+  bool  invertScroll;                 // True = invert scroll direction
 };
 
-#define SETTINGS_MAGIC 0x444F4F4D     // "DOOM"
+struct DeviceSettings {
+  uint32_t      magic;                // Magic validation bytes (0x444F4F4D = "DOOM")
+  uint8_t       version;              // Settings schema version
+  uint8_t       activeProfile;        // Currently active profile index (0 to NUM_PROFILES - 1)
+  char          deviceName[32];       // Bluetooth advertised name
+  TuningProfile profiles[NUM_PROFILES]; // Profile storage slots
+};
+
+#define SETTINGS_MAGIC    0x444F4F4D  // "DOOM"
+#define SETTINGS_VERSION  2
