@@ -71,10 +71,14 @@ The original upstream Doomscroller firmware attempted to emulate a composite tou
 
 ## Web Serial Configurator GUI
 
-No command-line or terminal app required! The project includes a standalone Web Serial interface located at [`configurator/index.html`](configurator/index.html).
+No command-line or terminal app required! You can configure your Doomscroller directly through your browser over HTTPS:
+
+👉 **[Launch Doomscroller Web Configurator](https://mrclintonbarnes.github.io/Doomscroller/)**
+
+*(Or open [`docs/index.html`](docs/index.html) locally in any Chromium browser)*
 
 ### How to Use the Web Configurator:
-1. Open [`configurator/index.html`](configurator/index.html) in any Chromium-based desktop browser (**Google Chrome**, **Microsoft Edge**, **Opera**, or **Brave**).
+1. Open the web configurator in any Chromium-based desktop browser (**Google Chrome**, **Microsoft Edge**, **Opera**, or **Brave**).
 2. Plug your Doomscroller into your computer via USB-C.
 3. Click **"Connect Controller"** in the top right.
 4. Select the Doomscroller serial port (e.g. `Seeed XIAO nRF52840 Sense` or `/dev/cu.usbmodem...`).
