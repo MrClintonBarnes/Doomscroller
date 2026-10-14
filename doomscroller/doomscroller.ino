@@ -89,7 +89,7 @@ void handleStreamCLI(Stream& io);
 void processCommand(Stream& io, String line);
 void switchProfile(uint8_t newProfile, Stream& io);
 void updateBleAddress();
-void sendMouseScroll(int8_t scrollSteps);
+bool sendMouseScroll(int8_t scrollSteps);
 void parkMouseEdge();
 void parkMouseCenter();
 float readBatteryVoltage();
@@ -316,16 +316,25 @@ void loop() {
     return;
   }
 
+  float absDelta = fabsf(deltaDeg);
   float absVel = fabsf(velocity);
-  if (absVel > prof.deadzoneDeg) {
+
+  // Deadzone filter: ignore resting jitter and micro-tremor
+  if (absDelta >= prof.deadzoneDeg || absVel >= 8.0f) {
     g_lastActivityTime = now;
     float dir = prof.invertScroll ? -1.0f : 1.0f;
     float baseSteps = (deltaDeg / prof.degreesPerStep) * dir;
 
-    // Dynamic flick acceleration curve
-    float accelMultiplier = 1.0f + (absVel * prof.accelFactor * 0.01f);
-    if (accelMultiplier > 8.0f) {
-      accelMultiplier = 8.0f;
+    // Dynamic flick acceleration curve:
+    // Pure 1:1 linear for slow & controlled scrolling (< 120 deg/s).
+    // Engages progressive multiplier only when flicking quickly (> 120 deg/s).
+    float accelMultiplier = 1.0f;
+    if (absVel > 120.0f && prof.accelFactor > 0.0f) {
+      float excessVel = absVel - 120.0f;
+      accelMultiplier += (excessVel * prof.accelFactor * 0.01f);
+      if (accelMultiplier > 8.0f) {
+        accelMultiplier = 8.0f;
+      }
     }
 
     float totalStepDelta = baseSteps * accelMultiplier;
@@ -333,12 +342,12 @@ void loop() {
 
     int stepsToSend = (int)g_substepAccumulator;
     if (stepsToSend != 0) {
-      g_substepAccumulator -= (float)stepsToSend;
-
       if (stepsToSend > 127) stepsToSend = 127;
       if (stepsToSend < -127) stepsToSend = -127;
 
-      sendMouseScroll((int8_t)stepsToSend);
+      if (sendMouseScroll((int8_t)stepsToSend)) {
+        g_substepAccumulator -= (float)stepsToSend;
+      }
 
       if (g_telemetryStream) {
         Serial.print(F("Delta: ")); Serial.print(deltaDeg, 2);
@@ -352,10 +361,12 @@ void loop() {
       }
     }
   } else {
-    // Settling decay when wheel is stationary
-    g_substepAccumulator *= 0.5f;
-    if (fabsf(g_substepAccumulator) < 0.05f) {
-      g_substepAccumulator = 0.0f;
+    // Settling decay when wheel is truly stationary: gently bleed off remainder after 200ms
+    if (now - g_lastActivityTime > 200) {
+      g_substepAccumulator *= 0.85f;
+      if (fabsf(g_substepAccumulator) < 0.02f) {
+        g_substepAccumulator = 0.0f;
+      }
     }
 
     // Check if 15 seconds have elapsed without motion
@@ -371,9 +382,9 @@ void loop() {
 // ============================================================================
 // Mouse Scroll HID Dispatcher
 // ============================================================================
-void sendMouseScroll(int8_t scrollSteps) {
+bool sendMouseScroll(int8_t scrollSteps) {
   uint8_t report[5] = { 0, 0, 0, (uint8_t)scrollSteps, 0 };
-  blehid.inputReport(1, report, sizeof(report));
+  return blehid.inputReport(1, report, sizeof(report));
 }
 
 // ============================================================================

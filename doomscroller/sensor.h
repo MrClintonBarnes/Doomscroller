@@ -22,6 +22,9 @@ public:
   // Resets tracking state (e.g. on wakeup or connect)
   void resetState();
 
+  // Re-applies MagAlpha hardware registers (BCT, Y_TRIM, FILTER, DIR)
+  void configureRegisters();
+
   // Get current raw angle
   uint16_t getRawAngle();
 

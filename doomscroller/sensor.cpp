@@ -11,18 +11,20 @@ ScrollSensor::ScrollSensor()
 {
 }
 
+void ScrollSensor::configureRegisters() {
+  _magAlpha.writeRegister(MA780_REG_BCT, 0);       // BCT side-shaft config
+  _magAlpha.writeRegister(MA780_REG_Y_TRIM, 2);   // Enable Y trimming (vital for side-shaft magnet!)
+  _magAlpha.writeRegister(MA780_REG_FILTER, 0xB0); // 78Hz internal digital filter
+  _magAlpha.writeRegister(MA780_REG_DIR, 128);    // Reverse direction
+}
+
 void ScrollSensor::begin() {
   pinMode(PIN_MPS_ENABLE, OUTPUT);
   enablePower(true);
   delay(5); // Allow sensor startup
 
   _magAlpha.begin(SPI_SCLK_FREQUENCY, MA_SPI_MODE_3, PIN_SPI_CS);
-
-  // Configure sensor hardware registers
-  _magAlpha.writeRegister(MA780_REG_BCT, 0);      // BCT side-shaft config
-  _magAlpha.writeRegister(MA780_REG_Y_TRIM, 2);  // Enable Y trimming
-  _magAlpha.writeRegister(MA780_REG_FILTER, 0xB0); // 78Hz internal digital filter
-  _magAlpha.writeRegister(MA780_REG_DIR, 128);   // Reverse direction
+  configureRegisters();
 
   resetState();
   Serial.println("[Sensor] MagAlpha MA780 initialized (SPI 5MHz, Mode 3, 78Hz HW filter).");
@@ -33,7 +35,9 @@ void ScrollSensor::enablePower(bool on) {
     digitalWrite(PIN_MPS_ENABLE, on ? HIGH : LOW);
     _powered = on;
     if (on) {
-      delayMicroseconds(250); // MA780 startup time is ~220us
+      delayMicroseconds(500); // Allow sensor VCC & analog core to stabilize
+      configureRegisters();   // Re-apply side-shaft calibration registers every time power is restored!
+      delayMicroseconds(200);
     }
   }
 }
@@ -41,10 +45,13 @@ void ScrollSensor::enablePower(bool on) {
 void ScrollSensor::resetState() {
   if (!_powered) {
     enablePower(true);
+  } else {
+    configureRegisters();
   }
   _lastRawAngle = _magAlpha.readAngleRaw();
   _lastSampleTime = millis();
   _firstSample = true;
+  _velFilter.clear();
 }
 
 uint16_t ScrollSensor::getRawAngle() {
